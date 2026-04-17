@@ -39,8 +39,8 @@ fn walks_vault_finds_all_md_files() {
     let ns = nodes(&events);
     assert_eq!(
         ns.len(),
-        9,
-        "expected 9 nodes, got: {:?}",
+        11,
+        "expected 11 nodes, got: {:?}",
         ns.iter().map(|n| &n.id).collect::<Vec<_>>()
     );
 }

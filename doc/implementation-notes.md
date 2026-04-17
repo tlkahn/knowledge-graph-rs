@@ -159,3 +159,126 @@ field. Consumers construct `PathBuf` when needed via `vault_path.join(id)`.
 The roadmap struck through inline `#tag` support. Tags come only from
 frontmatter `tags` field (array or single string). This simplifies
 parsing and avoids false positives in markdown headings.
+
+---
+
+## Stage 2 — Link Resolver
+
+### The stem key idea
+
+The central insight is that Obsidian wiki links like `[[Alice Smith]]`
+omit both the directory prefix and the `.md` extension, while node IDs
+are full relative paths (`People/Alice Smith.md`). We bridge this gap
+with a "stem" key: the lowercased basename without `.md`.
+
+`stem_of("People/Alice Smith.md")` → `"alice smith"`
+
+This is a one-liner (`rsplit('/').next()`, strip `.md`, lowercase) but
+it's the foundation everything else is built on. Getting this wrong
+cascades everywhere — early testing of edge cases (no directory, nested
+directories, no `.md` extension) paid off.
+
+### StemLookup: three-tier resolution
+
+`StemLookup` builds a `HashMap<String, Vec<String>>` keyed by stem plus
+a `HashSet<String>` of all node IDs. Resolution follows three tiers:
+
+1. **Exact-path match**: `target_raw + ".md"` exists in the ID set.
+   This handles `[[People/Alice Smith]]` → `People/Alice Smith.md`
+   directly. Also handles the edge case where users write `.md` in the
+   link itself (`[[Widget Theory.md]]`).
+
+2. **Stem match**: look up `stem_of(target_raw)` in the hash map.
+   If there's exactly one candidate, it's unambiguous. This handles the
+   common case: `[[Alice Smith]]` → unique `People/Alice Smith.md`.
+
+3. **Path-suffix disambiguation**: when the stem has multiple candidates
+   *and* the target contains `/`, check if any candidate's ID ends with
+   `/{target_raw}.md` (case-insensitive). This handles
+   `[[People/Alice Smith]]` disambiguating between `People/Alice Smith.md`
+   and `Archive/Alice Smith.md`.
+
+If still ambiguous: pick the first candidate alphabetically and emit
+`tracing::warn`. This is deterministic (sorted candidates in each
+bucket) and matches the TS implementation's "first match" behavior
+while being reproducible across runs.
+
+### resolve_edges: dedup strategy
+
+After resolving each edge's `target_raw`, we dedup by `(source,
+resolved_target)` keeping the first context encountered. This matches
+Stage 1's whole-file dedup on raw targets but operates on resolved IDs
+— two different `target_raw` values that resolve to the same node ID
+get collapsed.
+
+The dedup key for unresolved edges uses the raw `target_raw` string,
+so two distinct broken links from the same source are kept separate.
+Output is sorted by `(source, target_raw)` for determinism.
+
+### resolve_name: 5-tier cascade
+
+`resolve_name` is the query-time counterpart to `StemLookup::resolve`.
+Where `resolve` turns wiki-link text into node IDs, `resolve_name`
+finds nodes matching a user's search query. Five tiers, checked in
+order — first tier with any hits wins:
+
+1. **Id**: exact match on `node.id`
+2. **Exact**: exact match on `node.title`
+3. **CaseInsensitive**: lowercased title comparison
+4. **Alias**: case-insensitive match against `frontmatter["aliases"]`
+5. **Substring**: lowercased `query` contained in lowercased `title`
+
+The early-return-on-first-hit design means an exact title match won't
+also produce a substring result for the same node. This avoids confusing
+output where a single node appears at multiple match tiers.
+
+### Alias extraction
+
+`extract_aliases` mirrors `parser.rs::extract_tags` — it handles both
+`Value::Array` of strings and `Value::String` (single alias). This
+consistency was intentional since several fixture files use different
+alias formats: `aliases: ["A. Smith"]` vs `aliases: ["Widget Framework", "WT"]`.
+
+### CLI output pattern for resolve
+
+`kg resolve` follows the same bare-NDJSON pattern as `kg parse` (one
+JSON object per line, no envelope wrapper). Empty output with exit 0
+signals "no match" — this is not an error condition. This lets users
+compose with `jq` and `wc -l` naturally:
+
+```bash
+kg resolve "Ali" --vault ~/vault | jq '.id'
+kg resolve "Nothing" --vault ~/vault | wc -l   # → 0
+```
+
+### No new dependencies
+
+Stage 2 is pure `HashMap` / `HashSet` / string operations + `tracing::warn`.
+No new crate dependencies were needed — this kept the compile-time
+impact minimal.
+
+### Fixture vault changes
+
+Added two files to the existing fixture vault:
+
+- `Archive/Alice Smith.md` — creates an ambiguous basename (two files
+  named `Alice Smith.md` in different directories). Title is
+  `"Alice Smith (Archived)"` to differentiate.
+- `Ambiguous.md` — exercises both ambiguous (`[[Alice Smith]]`) and
+  unique (`[[Bob Jones]]`) links in a single document.
+
+The parser integration test's node count assertion was updated from
+9 → 11 to reflect the new files.
+
+### Test structure for Stage 2
+
+33 new tests across three locations:
+
+- **Unit tests** in `resolve.rs` `#[cfg(test)]`: 30 tests organized by
+  TDD cycle — `stem_of` (5), `StemLookup::build` (4),
+  `StemLookup::resolve` (7), `resolve_edges` (5), `resolve_name` (9).
+  Each cycle's tests use minimal synthetic data (test helpers `make_node`,
+  `make_node_full`, `make_edge`) rather than the fixture vault, keeping
+  them fast and focused.
+- **CLI smoke tests** in `cli_smoke.rs`: 3 tests — successful resolve,
+  empty result, missing vault error.

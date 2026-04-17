@@ -58,7 +58,34 @@ fn first_line(s: &str) -> String {
 fn dispatch(cli: Cli) -> Result<(), kg_core::Error> {
     match cli.command {
         Command::Parse { pretty } => cmd_parse(cli.vault, pretty),
+        Command::Resolve { name } => cmd_resolve(cli.vault, &name),
     }
+}
+
+fn cmd_resolve(vault: Option<PathBuf>, name: &str) -> Result<(), kg_core::Error> {
+    let vault_path = vault.ok_or_else(|| kg_core::Error::VaultNotFound {
+        path: "(provide --vault or set KG_VAULT_PATH)".into(),
+    })?;
+
+    let events = kg_core::parser::parse_vault(&vault_path)?;
+    let nodes: Vec<_> = events
+        .into_iter()
+        .filter_map(|e| match e {
+            kg_core::types::ParseEvent::Node(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+
+    let matches = kg_core::resolve::resolve_name(name, &nodes);
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for m in &matches {
+        serde_json::to_writer(&mut out, m).expect("serialize");
+        let _ = writeln!(out);
+    }
+
+    Ok(())
 }
 
 fn cmd_parse(vault: Option<PathBuf>, pretty: bool) -> Result<(), kg_core::Error> {

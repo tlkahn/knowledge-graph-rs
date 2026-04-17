@@ -123,6 +123,43 @@ fn parse_nonexistent_vault_returns_error() {
     assert_eq!(value["error"]["kind"], "vault_not_found");
 }
 
+// --- resolve command tests ---
+
+#[test]
+fn resolve_finds_alice_smith() {
+    let assert = kg()
+        .args(["resolve", "Alice Smith", "--vault", &fixture_vault()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!lines.is_empty(), "expected at least one match");
+    for line in &lines {
+        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSON: {e}: {line}"));
+        assert!(v.get("id").is_some());
+        assert!(v.get("kind").is_some());
+    }
+}
+
+#[test]
+fn resolve_nonexistent_name_empty_output() {
+    let assert = kg()
+        .args(["resolve", "NonExistentXYZ", "--vault", &fixture_vault()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(lines.is_empty(), "expected no matches, got: {lines:?}");
+}
+
+#[test]
+fn resolve_requires_vault_path() {
+    let assert = kg().args(["resolve", "Alice"]).assert().code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["ok"], Value::Bool(false));
+    assert_eq!(value["error"]["kind"], "vault_not_found");
+}
+
 fn regex_lite(_pat: &str) -> impl Fn(&str) -> bool {
     |s: &str| {
         let Some(rest) = s.strip_prefix("kg ") else {

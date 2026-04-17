@@ -25,4 +25,9 @@ pub enum Command {
         #[arg(long)]
         pretty: bool,
     },
+    /// Resolve a name against the vault's node set.
+    Resolve {
+        /// The name to resolve (node ID, title, alias, or substring).
+        name: String,
+    },
 }
