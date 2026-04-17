@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-
 #[derive(Debug, Parser)]
 #[command(name = "kg", version, about = "knowledge-graph CLI")]
 pub struct Cli {
@@ -20,6 +19,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Parse a vault into nodes and edges (stub in Stage 0).
-    Parse {},
+    /// Parse a vault into nodes and edges.
+    Parse {
+        /// Wrap output in an envelope and pretty-print.
+        #[arg(long)]
+        pretty: bool,
+    },
 }

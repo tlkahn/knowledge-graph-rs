@@ -1,6 +1,8 @@
 mod cli;
 mod envelope;
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, error::ErrorKind};
@@ -18,10 +20,7 @@ fn main() -> ExitCode {
     };
 
     match dispatch(cli) {
-        Ok(value) => {
-            emit_stdout(&Envelope::ok(value));
-            ExitCode::from(0)
-        }
+        Ok(()) => ExitCode::from(0),
         Err(err) => {
             let env: Envelope<()> = Envelope::err_from(&err);
             emit_stdout(&env);
@@ -44,8 +43,8 @@ fn handle_clap_error(err: clap::Error) -> ExitCode {
             ExitCode::from(0)
         }
         _ => {
-            // Suppress clap's native stderr render; emit envelope on stdout.
-            let env: Envelope<()> = Envelope::err("unknown_subcommand", first_line(&err.to_string()));
+            let env: Envelope<()> =
+                Envelope::err("unknown_subcommand", first_line(&err.to_string()));
             emit_stdout(&env);
             ExitCode::from(2)
         }
@@ -56,10 +55,36 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()
 }
 
-fn dispatch(cli: Cli) -> Result<serde_json::Value, kg_core::Error> {
+fn dispatch(cli: Cli) -> Result<(), kg_core::Error> {
     match cli.command {
-        Command::Parse {} => Err(kg_core::Error::NotImplemented {
-            feature: "parse".into(),
-        }),
+        Command::Parse { pretty } => cmd_parse(cli.vault, pretty),
     }
+}
+
+fn cmd_parse(vault: Option<PathBuf>, pretty: bool) -> Result<(), kg_core::Error> {
+    let vault_path = vault.ok_or_else(|| kg_core::Error::VaultNotFound {
+        path: "(provide --vault or set KG_VAULT_PATH)".into(),
+    })?;
+
+    let events = kg_core::parser::parse_vault(&vault_path)?;
+
+    if pretty {
+        let wrapper = serde_json::json!({
+            "ok": true,
+            "data": events,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&wrapper).expect("serialize")
+        );
+    } else {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        for event in &events {
+            serde_json::to_writer(&mut out, event).expect("serialize");
+            let _ = writeln!(out);
+        }
+    }
+
+    Ok(())
 }
