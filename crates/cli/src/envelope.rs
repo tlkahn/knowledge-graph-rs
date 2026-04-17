@@ -6,11 +6,13 @@ use serde_json::json;
 
 #[derive(Debug)]
 pub enum Envelope<T: Serialize> {
+    #[allow(dead_code)]
     Ok(T),
     Err(serde_json::Value),
 }
 
 impl<T: Serialize> Envelope<T> {
+    #[allow(dead_code)]
     pub fn ok(data: T) -> Self {
         Envelope::Ok(data)
     }
