@@ -2,13 +2,7 @@
 
 A fast, read-only knowledge graph tool for Obsidian vaults, written in Rust.
 
-Parses markdown files with YAML frontmatter, extracts wiki-link relationships,
-resolves links to canonical node IDs, and indexes the resulting graph into
-SQLite for persistent, incremental querying.
-Full-text search is built in via SQLite FTS5 with BM25 ranking and excerpt
-extraction. Graph traversal queries (neighbors, paths, shared connections,
-subgraph extraction) are powered by petgraph. Designed to be composed via
-pipes — every subcommand emits JSON to stdout.
+Parses markdown files with YAML frontmatter, extracts wiki-link relationships, resolves links to canonical node IDs, and indexes the resulting graph into SQLite for persistent, incremental querying. Full-text search is built in via SQLite FTS5 with BM25 ranking and excerpt extraction. Graph traversal queries (neighbors, paths, shared connections, subgraph extraction) and PageRank centrality ranking are powered by petgraph. Designed to be composed via pipes — every subcommand emits JSON to stdout.
 
 ## Quick start
 
@@ -52,6 +46,12 @@ kg shared "People/Alice Smith.md" "People/Bob Jones.md" --vault ~/my-vault
 # Extract an induced subgraph around seed nodes
 kg subgraph "Concepts/Widget Theory.md" "Ideas/Acme Project.md" --depth 1 --vault ~/my-vault
 
+# Rank nodes by PageRank centrality
+kg rank --vault ~/my-vault
+
+# Top 10 most important nodes
+kg rank --top 10 --vault ~/my-vault
+
 # Directed traversal (outgoing edges only)
 kg neighbors "People/Alice Smith.md" --directed --vault ~/my-vault
 
@@ -61,6 +61,7 @@ kg resolve "WT" --vault ~/my-vault | jq '.id'
 kg search "Alice" --vault ~/my-vault | jq '.excerpt'
 kg neighbors "People/Alice Smith.md" --vault ~/my-vault | jq '.[].id'
 kg subgraph "Concepts/Widget Theory.md" --vault ~/my-vault | jq '.nodes[] | select(.is_stub) | .id'
+kg rank --vault ~/my-vault | jq '.[0].title'
 ```
 
 The vault path can also be set via `KG_VAULT_PATH` environment variable.
@@ -154,6 +155,18 @@ Scores are BM25 values (more negative = more relevant). Excerpts highlight match
 }
 ```
 
+**Rank output** — array of nodes sorted by PageRank score (descending):
+
+```json
+[
+  {"id": "Concepts/Widget Theory.md", "title": "Widget Theory", "score": 0.134},
+  {"id": "People/Alice Smith.md", "title": "Alice Smith", "score": 0.110},
+  {"id": "People/Bob Jones.md", "title": "Bob Jones", "score": 0.088}
+]
+```
+
+Scores sum to 1.0 across all ranked nodes. Isolates (nodes with no edges) are excluded. Results are cached — a second `kg rank` call is instant if the graph hasn't changed.
+
 Errors always return `{"ok":false,"error":{"kind":"...","message":"..."}}` with a non-zero exit code.
 
 ## What gets parsed
@@ -187,6 +200,12 @@ After indexing, the knowledge graph can be queried as a directed graph. All trav
 
 Querying a nonexistent node ID returns `{"ok":false,"error":{"kind":"node_not_found",...}}` with exit code 1.
 
+## PageRank centrality
+
+`kg rank` computes PageRank on the knowledge graph to identify the most important nodes. The algorithm converts the directed edge graph to undirected, removes isolated nodes (no connections), and runs power iteration (damping factor 0.85) until convergence. If convergence fails, it falls back to normalized degree centrality.
+
+Results are cached in the SQLite database keyed by a graph fingerprint (node count, edge count, max modification time). After `kg index`, the first `kg rank` computes and caches; subsequent calls return instantly until the next index run changes the graph.
+
 ## Persistence and incremental indexing
 
 `kg index` builds a SQLite database (default: `<vault>/.kg/kg.db`) containing the full knowledge graph. Subsequent runs are incremental: only files whose mtime has changed since the last index are re-parsed. Deleted files are cleaned up, and new files are added.
@@ -204,8 +223,8 @@ Because adding or removing a node can change how wiki-links resolve across the e
 | 2 — Link resolver | Done | Resolve `[[target]]` to canonical node IDs, `kg resolve` subcommand |
 | 3 — Store + indexer | Done | SQLite persistence, incremental mtime-based re-indexing, `kg index` + `kg stats` |
 | 4 — Keyword search | Done | FTS5 full-text search with BM25 ranking, snippet excerpts, `kg search` |
-| 5 — Graph queries | Done | BFS neighbors, DFS paths, shared connections, subgraph extraction via petgraph (210 tests) |
-| 6 — PageRank | Planned | Ranking on largest connected component |
+| 5 — Graph queries | Done | BFS neighbors, DFS paths, shared connections, subgraph extraction via petgraph |
+| 6 — PageRank | Done | Power-iteration PageRank with degree centrality fallback, cached results (244 tests) |
 | 7 — Embeddings | Planned | Semantic search via external embedder (`KG_EMBED_CMD`) |
 
 ## License

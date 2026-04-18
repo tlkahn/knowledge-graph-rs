@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -331,6 +332,51 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(nodes)
+    }
+
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>, Error> {
+        let mut stmt = self.conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
+        let mut rows = stmt.query([key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn max_mtime(&self) -> Result<i64, Error> {
+        let mtime: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(mtime), 0) FROM nodes WHERE is_stub = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(mtime)
+    }
+
+    pub fn node_titles(&self) -> Result<HashMap<String, String>, Error> {
+        let mut stmt = self.conn.prepare("SELECT id, title FROM nodes")?;
+        let map = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                Ok((id, title))
+            })?
+            .collect::<Result<HashMap<String, String>, _>>()?;
+        Ok(map)
+    }
+
+    pub fn graph_fingerprint(&self) -> Result<String, Error> {
+        let stats = self.stats()?;
+        let total_nodes = stats.nodes + stats.stubs;
+        let max_mtime = self.max_mtime()?;
+        Ok(format!("{}:{}:{}", total_nodes, stats.edges, max_mtime))
     }
 
     pub fn begin_transaction(&self) -> Result<(), Error> {
@@ -874,6 +920,100 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let meta = store.all_nodes_metadata().unwrap();
         assert!(meta.is_empty());
+    }
+
+    // --- get_meta / set_meta ---
+
+    #[test]
+    fn get_meta_nonexistent_returns_none() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.get_meta("nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn set_meta_get_meta_round_trip() {
+        let store = Store::open_memory().unwrap();
+        store.set_meta("foo", "bar").unwrap();
+        assert_eq!(store.get_meta("foo").unwrap(), Some("bar".into()));
+    }
+
+    #[test]
+    fn set_meta_overwrites_existing() {
+        let store = Store::open_memory().unwrap();
+        store.set_meta("key", "old").unwrap();
+        store.set_meta("key", "new").unwrap();
+        assert_eq!(store.get_meta("key").unwrap(), Some("new".into()));
+    }
+
+    #[test]
+    fn schema_version_readable_via_get_meta() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.get_meta("schema_version").unwrap(), Some("2".into()));
+    }
+
+    // --- max_mtime ---
+
+    #[test]
+    fn max_mtime_empty_db_returns_zero() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.max_mtime().unwrap(), 0);
+    }
+
+    #[test]
+    fn max_mtime_returns_largest() {
+        let store = Store::open_memory().unwrap();
+        let node_a = make_node("a.md", "A", &[], json!({}));
+        store.upsert_node(&node_a, 100).unwrap();
+        let node_b = make_node("b.md", "B", &[], json!({}));
+        store.upsert_node(&node_b, 200).unwrap();
+        assert_eq!(store.max_mtime().unwrap(), 200);
+    }
+
+    #[test]
+    fn max_mtime_ignores_stubs() {
+        let store = Store::open_memory().unwrap();
+        let node = make_node("a.md", "A", &[], json!({}));
+        store.upsert_node(&node, 50).unwrap();
+        store.upsert_stub("Ghost").unwrap();
+        assert_eq!(store.max_mtime().unwrap(), 50);
+    }
+
+    // --- node_titles ---
+
+    #[test]
+    fn node_titles_returns_all() {
+        let store = Store::open_memory().unwrap();
+        let node = make_node("a.md", "Alpha", &[], json!({}));
+        store.upsert_node(&node, 1).unwrap();
+        store.upsert_stub("Ghost").unwrap();
+
+        let titles = store.node_titles().unwrap();
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles["a.md"], "Alpha");
+        assert_eq!(titles["Ghost"], "");
+    }
+
+    // --- graph_fingerprint ---
+
+    #[test]
+    fn graph_fingerprint_changes_with_data() {
+        let store = Store::open_memory().unwrap();
+        let fp1 = store.graph_fingerprint().unwrap();
+
+        let node = make_node("a.md", "A", &[], json!({}));
+        store.upsert_node(&node, 100).unwrap();
+        let fp2 = store.graph_fingerprint().unwrap();
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn graph_fingerprint_stable_for_same_data() {
+        let store = Store::open_memory().unwrap();
+        let node = make_node("a.md", "A", &[], json!({}));
+        store.upsert_node(&node, 100).unwrap();
+        let fp1 = store.graph_fingerprint().unwrap();
+        let fp2 = store.graph_fingerprint().unwrap();
+        assert_eq!(fp1, fp2);
     }
 
     #[test]

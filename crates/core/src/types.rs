@@ -48,6 +48,12 @@ pub struct Subgraph {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RankEntry {
+    pub id: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResult {
     pub id: String,
     pub title: String,
@@ -119,6 +125,28 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["type"], "node");
         assert_eq!(value["id"], "test.md");
+    }
+
+    #[test]
+    fn rank_entry_serializes_to_json() {
+        let entry = RankEntry {
+            id: "People/Alice Smith.md".into(),
+            score: 0.42,
+        };
+        let value = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(value["id"], "People/Alice Smith.md");
+        assert_eq!(value["score"], 0.42);
+    }
+
+    #[test]
+    fn rank_entry_round_trips() {
+        let entry = RankEntry {
+            id: "test.md".into(),
+            score: 0.123,
+        };
+        let json_str = serde_json::to_string(&entry).expect("serialize");
+        let back: RankEntry = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back, entry);
     }
 
     #[test]

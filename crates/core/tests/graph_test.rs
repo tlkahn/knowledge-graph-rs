@@ -84,3 +84,37 @@ fn neighbors_code_fences() {
     let ids: Vec<&str> = result.iter().map(|e| e.id.as_str()).collect();
     assert_eq!(ids, vec!["Real Link"]);
 }
+
+// --- rank integration tests ---
+
+#[test]
+fn rank_orphan_excluded() {
+    let kg = build_fixture_graph();
+    let result = kg.rank(100);
+    assert!(
+        result.iter().all(|e| e.id != "orphan.md"),
+        "orphan (isolate) should be excluded from rank"
+    );
+}
+
+#[test]
+fn rank_widget_theory_in_top_3() {
+    let kg = build_fixture_graph();
+    let result = kg.rank(3);
+    let ids: Vec<&str> = result.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains(&"Concepts/Widget Theory.md"),
+        "Widget Theory should be in top 3, got: {ids:?}"
+    );
+}
+
+#[test]
+fn rank_scores_sum_to_one_fixture() {
+    let kg = build_fixture_graph();
+    let result = kg.rank(100);
+    let sum: f64 = result.iter().map(|e| e.score).sum();
+    assert!(
+        (sum - 1.0).abs() < 1e-4,
+        "scores should sum to 1.0, got {sum}"
+    );
+}

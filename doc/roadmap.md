@@ -6,7 +6,7 @@ Scope: library crate + single CLI binary. Read-only against the vault. No MCP.
 
 ## Design decisions (locked)
 
-- **Blueprint**: Refer to the original blueprint project
+- **Blueprint**: Refer to the original **blueprint project**
   [knowledge-graph](~/Desktop/knowledge-graph/CLAUDE.md)
 - **Layout**: Cargo workspace at `~/Desktop/knowledge-graph-rs/`.
   - `crates/core` — library (`kg-core`): pure logic, no I/O glue.
@@ -244,16 +244,19 @@ Total: 210 tests.
 
 **Goal**: one analytics signal that's actually useful for ranking.
 
-- Run on the largest weakly-connected component only (matches TS behavior,
-  avoids PageRank blowing up on isolated nodes).
-- Use `petgraph`'s page rank if stable; otherwise a ~30-line power-iteration.
-- Fallback to degree centrality if iteration fails to converge in N steps.
-- Cache result in `meta` keyed by a graph fingerprint (node count + edge
-  count + max mtime) so `kg rank` is instant after `kg index`.
+- Remove degree-0 isolates, run power-iteration PageRank on the remaining graph (converted to undirected), return `(id, title, score)` sorted descending.
+- Algorithm: damping=0.85, max_iter=100, epsilon=1e-6. Dangling nodes (out_degree=0 in undirected view) redistribute mass uniformly.
+- Fallback to degree centrality if iteration fails to converge.
+- Cache result in `meta` keyed by a graph fingerprint (`{node_count}:{edge_count}:{max_mtime}`) so `kg rank` is instant after `kg index`.
+- New `Store` methods: `get_meta()`, `set_meta()`, `max_mtime()`, `node_titles()`, `graph_fingerprint()`.
+- New type: `RankEntry { id, score }`.
+- New `KnowledgeGraph` methods: `rank(top)`, `degree_centrality(top)`.
 
-**CLI**: `kg rank [--top N]` — sorted list of `(id, title, score)`.
+**CLI**: `kg rank [--top N]` — JSON array of `{id, title, score}`, default top 20.
 
-**Tests**: known small graph with hand-computed expected ranks.
+**Tests**: 34 new tests — `RankEntry` serialization, store meta/mtime/fingerprint methods, PageRank unit tests (isolates, two-node, triangle, star, top limit, score sum, stubs, empty graph), degree centrality unit tests, integration tests against fixture vault, CLI smoke tests (valid output, --top, sorting, vault required, empty DB, cache consistency). Total: 244 tests.
+
+[x] This stage has been implemented.
 
 ---
 

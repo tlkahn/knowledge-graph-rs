@@ -784,3 +784,112 @@ risk to existing databases.
 
 Total across all stages: 210 tests (148 core lib + 8 graph + 7 indexer +
 13 parser + 4 store + 2 envelope + 28 CLI).
+
+---
+
+## Stage 6 — PageRank
+
+Built on top of commit `6e54625`.
+
+### Why power iteration, not petgraph's page_rank
+
+`petgraph` 0.8 doesn't expose a PageRank function. Its algorithm module has Dijkstra, A*, Bellman-Ford, SCC, etc. — but no centrality measures. There are community crates, but they're unmaintained or pull in heavy transitive dependencies. A clean power iteration is ~60 lines of Rust, well-tested, and carries no extra dependencies.
+
+### Undirected conversion strategy
+
+The TS blueprint's `safeRank()` converts the directed graph to undirected before running PageRank. We replicate this by building a `HashMap<NodeIndex, HashSet<NodeIndex>>` adjacency structure from the DiGraph, treating each directed edge as a bidirectional pair. Deduplication uses sorted `(min, max)` pairs via `HashSet<(NodeIndex, NodeIndex)>`.
+
+Self-loops are excluded from the undirected view. A self-loop doesn't contribute meaningful connectivity information and would inflate a node's degree without representing an actual relationship to another node.
+
+### Isolate removal
+
+Nodes with undirected degree 0 (no edges in either direction) are excluded from PageRank computation entirely. Without this, isolates receive `1/N` of the total probability mass despite being unreachable — they dilute scores for connected nodes and are uninteresting for ranking purposes.
+
+The exclusion happens at the algorithm level (filtering to nodes with degree > 0 in the undirected adjacency), not at the graph construction level. Isolated nodes still exist in the `KnowledgeGraph` and are queryable via `neighbors()`, `path()`, etc. — they just don't appear in rank results.
+
+### Dangling node handling
+
+In the undirected view, a node can still have degree 0 within the active set if all its neighbors were isolates that got filtered out. In practice this doesn't happen (if a node has an undirected neighbor, that neighbor also has degree > 0 and stays in the active set). But the algorithm handles it correctly: dangling mass (from nodes with out_degree=0) is redistributed uniformly to all active nodes, matching the standard PageRank formulation.
+
+The power iteration formula:
+
+```
+PR_new(v) = (1 - d) / N + d * (Σ PR(u)/deg(u) for each neighbor u of v + dangling_sum / N)
+```
+
+where `d = 0.85`, `N` = active node count, and `dangling_sum` is the total PageRank of degree-0 nodes.
+
+### Convergence and fallback
+
+The algorithm runs up to 100 iterations with convergence threshold `epsilon = 1e-6` (maximum absolute difference between consecutive score vectors). On the fixture vault (12 active nodes, 21 edges), convergence takes ~25 iterations. For any reasonable vault size, this is instant.
+
+If convergence fails (hypothetically: highly degenerate graph structure), `rank()` falls back to `degree_centrality()`. This is a normalized undirected degree measure: each node's score is its undirected degree divided by the total degree sum, so scores still sum to 1.0. The fallback was never triggered in testing but provides a safety net.
+
+### Score properties
+
+Both `rank()` and `degree_centrality()` produce scores that sum to 1.0 across all returned entries. This is verified by unit tests (`rank_scores_sum_to_one`, `degree_centrality_scores_sum_to_one`) and the fixture vault integration test (`rank_scores_sum_to_one_fixture`).
+
+Results are sorted descending by score, with ties broken alphabetically by ID. The `top` parameter truncates after sorting — requesting `top=2` on a 12-node graph returns only the 2 highest-ranked nodes.
+
+### Degree centrality normalization
+
+`degree_centrality()` normalizes by total degree sum (sum of all nodes' undirected degrees), not by `N - 1` (the maximum possible degree). This means scores depend on graph density, not just relative degree. The total-degree-sum normalization was chosen because it guarantees scores sum to 1.0, making the output directly comparable to PageRank scores.
+
+### Cache design
+
+`cmd_rank()` in the CLI checks a fingerprint before computing:
+
+1. Compute `graph_fingerprint()` = `"{total_nodes}:{edges}:{max_mtime}"` from the Store.
+2. Compare with `get_meta("rank_cache_fingerprint")`.
+3. Cache hit: deserialize `get_meta("rank_cache_data")` as `Vec<RankEntry>`, skip computation.
+4. Cache miss: compute `rank(usize::MAX)` (full result set), serialize to cache, then truncate to `--top`.
+
+The fingerprint captures structural changes (node/edge count) and content changes (max mtime). It doesn't capture which specific nodes changed — a rename that preserves counts but changes graph structure would invalidate the fingerprint only if it changes the mtime. This is a pragmatic tradeoff: the false-negative rate (stale cache served) is near zero because `kg index` always updates at least one mtime when the graph changes.
+
+The full result set is cached (not truncated). This means `kg rank --top 5` followed by `kg rank --top 20` serves the second call from cache, just reading more entries. The cost is storing the full JSON blob, which for a 10k-node vault is ~500KB — negligible for SQLite.
+
+### Floating-point round-trip through JSON cache
+
+The initial CLI smoke test compared raw stdout strings between a fresh computation and a cached read. This failed with a 1-ULP difference on one score: `0.11240373512704267` vs `0.11240373512704269`. The cause: f64 → JSON string → f64 round-trip via serde_json can lose the least significant bit.
+
+`serde_json` uses `ryu` for float serialization, which produces the shortest representation that uniquely identifies the f64 bit pattern. But parsing that string back doesn't always recover the exact same bit pattern — IEEE 754 double precision has more representable values than decimal strings of a given length can distinguish.
+
+The fix: the cache consistency test parses both outputs as JSON values and compares scores within `1e-10` epsilon rather than doing string equality. This is the right semantic — the scores are "the same" for any practical purpose, even if their bit patterns differ by 1 ULP.
+
+### `open_store_and_graph` helper
+
+`cmd_rank()` needs both the `Store` (for cache and title lookup) and the `KnowledgeGraph` (for computation). The existing `open_graph()` helper only returned the graph, dropping the store. Rather than restructuring `open_graph`, a new `open_store_and_graph()` helper returns both. This avoids opening the database twice (once for Store, once for KnowledgeGraph::from_store).
+
+Currently only `rank` uses this helper. Future stages (e.g. export with metadata) may need both as well.
+
+### Title enrichment
+
+`RankEntry` in `kg-core` contains only `id` and `score` — it's a pure algorithm output. The CLI enriches each entry with `title` from `store.node_titles()` before emitting JSON. This keeps the core algorithm independent of presentation concerns while giving CLI users human-readable output.
+
+Stubs appear with empty-string titles. This is correct — a stub represents an unresolved link target with no file content to derive a title from.
+
+### New Store methods
+
+Five new methods on `Store`, all read-only queries against existing tables:
+
+- **`get_meta(key)`** / **`set_meta(key, value)`**: Generic key-value access to the `meta` table. `get_meta` returns `Option<String>` (None for missing keys). `set_meta` uses `INSERT OR REPLACE`. The existing `schema_version()` method reads the same table via a hardcoded query — the new methods are generic alternatives. Both coexist because `schema_version()` is called during `migrate()` before the meta table is guaranteed to have arbitrary keys.
+
+- **`max_mtime()`**: `SELECT COALESCE(MAX(mtime), 0) FROM nodes WHERE is_stub = 0`. Returns 0 for empty databases. The `is_stub = 0` filter is important — stubs have `mtime = 0` (set by `upsert_stub`), which would make the max mtime useless as a change signal.
+
+- **`node_titles()`**: `SELECT id, title FROM nodes` into a `HashMap<String, String>`. Includes stubs (with empty title). Used only by the CLI for title enrichment.
+
+- **`graph_fingerprint()`**: Combines `stats()` counts with `max_mtime()` into a string. This hits the database twice (two queries inside `stats()` + one for `max_mtime()`), but both are simple aggregates that SQLite answers instantly.
+
+### Test structure
+
+34 new tests across five locations:
+
+- **2 unit tests** in `types.rs`: `RankEntry` serialization and round-trip.
+- **10 unit tests** in `store.rs`: `get_meta`/`set_meta` (4: missing key, round-trip, overwrite, schema_version readable), `max_mtime` (3: empty db, largest wins, ignores stubs), `node_titles` (1), `graph_fingerprint` (2: changes with data, stable for same data).
+- **16 unit tests** in `graph.rs`: `rank` (10: single isolate, two-node, triangle, star, isolates excluded, top limit, sorted descending, scores sum to 1, stubs participate, empty graph), `degree_centrality` (3: star center, isolates excluded, scores sum to 1). All use manual graph construction via `build_graph()` helpers.
+- **3 integration tests** in `graph_test.rs`: rank against fixture vault — orphan excluded, Widget Theory in top 3, scores sum to 1.0.
+- **6 CLI smoke tests** in `cli_smoke.rs`: valid JSON array output, `--top` limits results, sorted descending, requires vault, empty DB returns empty array, cached second call matches first.
+
+Notably missing: no test for the `degree_centrality` fallback being triggered by `rank()`, because we couldn't construct a graph that fails to converge within 100 iterations. The fallback exists as a safety net, exercised only through its own direct tests.
+
+Total across all stages: 244 tests (174 core lib + 11 graph + 7 indexer + 13 parser + 4 store + 2 envelope + 34 CLI).

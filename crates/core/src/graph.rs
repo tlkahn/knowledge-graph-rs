@@ -5,7 +5,7 @@ use petgraph::Direction;
 
 use crate::error::Error;
 use crate::store::Store;
-use crate::types::{NeighborEntry, Subgraph, SubgraphEdge, SubgraphNode};
+use crate::types::{NeighborEntry, RankEntry, Subgraph, SubgraphEdge, SubgraphNode};
 
 pub struct KnowledgeGraph {
     graph: DiGraph<String, ()>,
@@ -247,6 +247,153 @@ impl KnowledgeGraph {
         edges.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.target.cmp(&b.target)));
 
         Ok(Subgraph { nodes, edges })
+    }
+
+    pub fn degree_centrality(&self, top: usize) -> Vec<RankEntry> {
+        let mut undirected_degree: HashMap<NodeIndex, usize> = HashMap::new();
+        let mut seen_pairs: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
+
+        for ei in self.graph.edge_indices() {
+            if let Some((src, tgt)) = self.graph.edge_endpoints(ei) {
+                let pair = if src <= tgt { (src, tgt) } else { (tgt, src) };
+                if seen_pairs.insert(pair) {
+                    *undirected_degree.entry(src).or_insert(0) += 1;
+                    if src != tgt {
+                        *undirected_degree.entry(tgt).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let total_degree: usize = undirected_degree.values().sum();
+        if total_degree == 0 {
+            return Vec::new();
+        }
+
+        let mut entries: Vec<RankEntry> = undirected_degree
+            .into_iter()
+            .filter(|&(_, deg)| deg > 0)
+            .map(|(ni, deg)| RankEntry {
+                id: self.graph[ni].clone(),
+                score: deg as f64 / total_degree as f64,
+            })
+            .collect();
+
+        entries.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap()
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        entries.truncate(top);
+        entries
+    }
+
+    pub fn rank(&self, top: usize) -> Vec<RankEntry> {
+        let mut undirected_adj: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
+        let mut seen_pairs: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
+
+        for ei in self.graph.edge_indices() {
+            if let Some((src, tgt)) = self.graph.edge_endpoints(ei) {
+                if src == tgt {
+                    continue;
+                }
+                let pair = if src <= tgt { (src, tgt) } else { (tgt, src) };
+                if seen_pairs.insert(pair) {
+                    undirected_adj.entry(src).or_default().insert(tgt);
+                    undirected_adj.entry(tgt).or_default().insert(src);
+                }
+            }
+        }
+
+        let active: Vec<NodeIndex> = self
+            .graph
+            .node_indices()
+            .filter(|ni| undirected_adj.get(ni).is_some_and(|s| !s.is_empty()))
+            .collect();
+
+        let n = active.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let idx_map: HashMap<NodeIndex, usize> = active
+            .iter()
+            .enumerate()
+            .map(|(i, &ni)| (ni, i))
+            .collect();
+
+        let damping = 0.85_f64;
+        let max_iter = 100;
+        let epsilon = 1e-6_f64;
+
+        let init = 1.0 / n as f64;
+        let mut pr = vec![init; n];
+
+        let degrees: Vec<usize> = active
+            .iter()
+            .map(|ni| undirected_adj.get(ni).map_or(0, |s| s.len()))
+            .collect();
+
+        let mut converged = false;
+
+        for _ in 0..max_iter {
+            let dangling_sum: f64 = active
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| degrees[i] == 0)
+                .map(|(i, _)| pr[i])
+                .sum();
+
+            let mut pr_new = vec![0.0_f64; n];
+            let base = (1.0 - damping) / n as f64 + damping * dangling_sum / n as f64;
+
+            for (i, &ni) in active.iter().enumerate() {
+                pr_new[i] = base;
+                if let Some(neighbors) = undirected_adj.get(&ni) {
+                    for &neighbor in neighbors {
+                        if let Some(&j) = idx_map.get(&neighbor) {
+                            pr_new[i] += damping * pr[j] / degrees[j] as f64;
+                        }
+                    }
+                }
+            }
+
+            let max_diff = pr
+                .iter()
+                .zip(pr_new.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+
+            pr = pr_new;
+
+            if max_diff < epsilon {
+                converged = true;
+                break;
+            }
+        }
+
+        if !converged {
+            return self.degree_centrality(top);
+        }
+
+        let mut entries: Vec<RankEntry> = active
+            .iter()
+            .enumerate()
+            .map(|(i, &ni)| RankEntry {
+                id: self.graph[ni].clone(),
+                score: pr[i],
+            })
+            .collect();
+
+        entries.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap()
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        entries.truncate(top);
+        entries
     }
 }
 
@@ -575,6 +722,135 @@ mod tests {
         let kg = build_graph(&["A"], &[]);
         let err = kg.subgraph(&["Z"], 1, false).unwrap_err();
         assert!(matches!(err, Error::NodeNotFound { .. }));
+    }
+
+    // --- Cycle 7: rank (PageRank) ---
+
+    #[test]
+    fn rank_single_isolate_returns_empty() {
+        let kg = build_graph(&["A"], &[]);
+        let result = kg.rank(10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn rank_two_connected_nodes_equal() {
+        let kg = build_graph(&["A", "B"], &[("A", "B")]);
+        let result = kg.rank(10);
+        assert_eq!(result.len(), 2);
+        assert!((result[0].score - result[1].score).abs() < 1e-4);
+        let sum: f64 = result.iter().map(|e| e.score).sum();
+        assert!((sum - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rank_triangle_all_equal() {
+        let kg = build_graph(&["A", "B", "C"], &[("A", "B"), ("B", "C"), ("C", "A")]);
+        let result = kg.rank(10);
+        assert_eq!(result.len(), 3);
+        for entry in &result {
+            assert!((entry.score - 1.0 / 3.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn rank_star_center_highest() {
+        let kg = build_graph(
+            &["Center", "L1", "L2", "L3"],
+            &[("Center", "L1"), ("Center", "L2"), ("Center", "L3")],
+        );
+        let result = kg.rank(10);
+        assert_eq!(result[0].id, "Center");
+        assert!(result[0].score > result[1].score);
+        assert!((result[1].score - result[2].score).abs() < 1e-4);
+        assert!((result[2].score - result[3].score).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rank_isolates_excluded() {
+        let kg = build_graph(&["A", "B", "Isolated"], &[("A", "B")]);
+        let result = kg.rank(10);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|e| e.id != "Isolated"));
+    }
+
+    #[test]
+    fn rank_top_limits_output() {
+        let kg = build_graph(
+            &["A", "B", "C", "D"],
+            &[("A", "B"), ("B", "C"), ("C", "D")],
+        );
+        let result = kg.rank(2);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn rank_sorted_descending() {
+        let kg = build_graph(
+            &["Center", "L1", "L2", "L3"],
+            &[("Center", "L1"), ("Center", "L2"), ("Center", "L3")],
+        );
+        let result = kg.rank(10);
+        for i in 1..result.len() {
+            assert!(result[i - 1].score >= result[i].score);
+        }
+    }
+
+    #[test]
+    fn rank_scores_sum_to_one() {
+        let kg = build_graph(
+            &["A", "B", "C", "D"],
+            &[("A", "B"), ("B", "C"), ("C", "D"), ("D", "A")],
+        );
+        let result = kg.rank(100);
+        let sum: f64 = result.iter().map(|e| e.score).sum();
+        assert!((sum - 1.0).abs() < 1e-4, "scores sum to {sum}");
+    }
+
+    #[test]
+    fn rank_stubs_with_edges_participate() {
+        let kg = build_graph_with_stubs(&["A"], &["Stub"], &[("A", "Stub")]);
+        let result = kg.rank(10);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|e| e.id == "Stub"));
+    }
+
+    #[test]
+    fn rank_empty_graph_returns_empty() {
+        let kg = build_graph(&[], &[]);
+        let result = kg.rank(10);
+        assert!(result.is_empty());
+    }
+
+    // --- Cycle 8: degree_centrality ---
+
+    #[test]
+    fn degree_centrality_star_center_highest() {
+        let kg = build_graph(
+            &["Center", "L1", "L2", "L3"],
+            &[("Center", "L1"), ("Center", "L2"), ("Center", "L3")],
+        );
+        let result = kg.degree_centrality(10);
+        assert_eq!(result[0].id, "Center");
+        assert!(result[0].score > result[1].score);
+    }
+
+    #[test]
+    fn degree_centrality_isolates_excluded() {
+        let kg = build_graph(&["A", "B", "Isolated"], &[("A", "B")]);
+        let result = kg.degree_centrality(10);
+        assert!(result.iter().all(|e| e.id != "Isolated"));
+    }
+
+    #[test]
+    fn degree_centrality_scores_sum_to_one() {
+        let kg = build_graph(
+            &["A", "B", "C"],
+            &[("A", "B"), ("B", "C")],
+        );
+        let result = kg.degree_centrality(10);
+        let sum: f64 = result.iter().map(|e| e.score).sum();
+        assert!((sum - 1.0).abs() < 1e-4, "scores sum to {sum}");
     }
 
     #[test]

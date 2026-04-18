@@ -450,6 +450,129 @@ fn subgraph_returns_valid_json() {
     assert!(value["edges"].is_array());
 }
 
+// --- rank command tests ---
+
+#[test]
+fn rank_returns_valid_json_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["rank", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert!(value.is_array(), "rank output should be a JSON array");
+    let arr = value.as_array().unwrap();
+    assert!(!arr.is_empty());
+    assert!(arr[0].get("id").is_some());
+    assert!(arr[0].get("title").is_some());
+    assert!(arr[0].get("score").is_some());
+}
+
+#[test]
+fn rank_top_limits_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["rank", "--top", "2", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    let arr = value.as_array().unwrap();
+    assert!(arr.len() <= 2);
+}
+
+#[test]
+fn rank_sorted_descending() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["rank", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    let arr = value.as_array().unwrap();
+    for i in 1..arr.len() {
+        let prev = arr[i - 1]["score"].as_f64().unwrap();
+        let curr = arr[i]["score"].as_f64().unwrap();
+        assert!(prev >= curr, "results should be sorted descending by score");
+    }
+}
+
+#[test]
+fn rank_requires_vault() {
+    let assert = kg().arg("rank").assert().code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["error"]["kind"], "vault_not_found");
+}
+
+#[test]
+fn rank_empty_db_returns_empty_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let dd = data_dir.to_string_lossy().to_string();
+
+    let assert = kg()
+        .args(["rank", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert!(value.is_array());
+    assert!(value.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn rank_cached_second_call_matches_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert1 = kg()
+        .args(["rank", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let v1 = parse_stdout_json(&assert1.get_output().stdout);
+
+    let assert2 = kg()
+        .args(["rank", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let v2 = parse_stdout_json(&assert2.get_output().stdout);
+
+    let a1 = v1.as_array().unwrap();
+    let a2 = v2.as_array().unwrap();
+    assert_eq!(a1.len(), a2.len(), "cached call should return same number of entries");
+    for (e1, e2) in a1.iter().zip(a2.iter()) {
+        assert_eq!(e1["id"], e2["id"], "IDs should match");
+        let s1 = e1["score"].as_f64().unwrap();
+        let s2 = e2["score"].as_f64().unwrap();
+        assert!((s1 - s2).abs() < 1e-10, "scores should match within epsilon");
+    }
+}
+
 fn regex_lite(_pat: &str) -> impl Fn(&str) -> bool {
     |s: &str| {
         let Some(rest) = s.strip_prefix("kg ") else {

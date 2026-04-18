@@ -62,6 +62,7 @@ fn dispatch(cli: Cli) -> Result<(), kg_core::Error> {
         Command::Index => cmd_index(cli.vault, cli.data_dir),
         Command::Stats => cmd_stats(cli.vault, cli.data_dir),
         Command::Search { query, limit } => cmd_search(cli.vault, cli.data_dir, &query, limit),
+        Command::Rank { top } => cmd_rank(cli.vault, cli.data_dir, top),
         Command::Neighbors { id, depth, directed } => cmd_neighbors(cli.vault, cli.data_dir, &id, depth, directed),
         Command::Path { from, to, max_depth, directed } => cmd_path(cli.vault, cli.data_dir, &from, &to, max_depth, directed),
         Command::Shared { a, b, directed } => cmd_shared(cli.vault, cli.data_dir, &a, &b, directed),
@@ -150,6 +151,47 @@ fn open_graph(vault: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<kg_co
     let db_path = dir.join("kg.db");
     let store = kg_core::store::Store::open(&db_path)?;
     kg_core::graph::KnowledgeGraph::from_store(&store)
+}
+
+fn open_store_and_graph(vault: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<(kg_core::store::Store, kg_core::graph::KnowledgeGraph), kg_core::Error> {
+    let vault_path = require_vault(vault)?;
+    let dir = resolve_data_dir(&vault_path, data_dir);
+    let db_path = dir.join("kg.db");
+    let store = kg_core::store::Store::open(&db_path)?;
+    let kg = kg_core::graph::KnowledgeGraph::from_store(&store)?;
+    Ok((store, kg))
+}
+
+fn cmd_rank(vault: Option<PathBuf>, data_dir: Option<PathBuf>, top: usize) -> Result<(), kg_core::Error> {
+    let (store, kg) = open_store_and_graph(vault, data_dir)?;
+
+    let fingerprint = store.graph_fingerprint()?;
+    let cached_fp = store.get_meta("rank_cache_fingerprint")?;
+
+    let all_entries: Vec<kg_core::types::RankEntry> = if cached_fp.as_deref() == Some(&fingerprint) {
+        let data = store.get_meta("rank_cache_data")?.unwrap_or_default();
+        serde_json::from_str(&data).unwrap_or_else(|_| kg.rank(usize::MAX))
+    } else {
+        let entries = kg.rank(usize::MAX);
+        if let Ok(json) = serde_json::to_string(&entries) {
+            let _ = store.set_meta("rank_cache_fingerprint", &fingerprint);
+            let _ = store.set_meta("rank_cache_data", &json);
+        }
+        entries
+    };
+
+    let titles = store.node_titles()?;
+    let truncated: Vec<serde_json::Value> = all_entries
+        .into_iter()
+        .take(top)
+        .map(|e| {
+            let title = titles.get(&e.id).cloned().unwrap_or_default();
+            serde_json::json!({ "id": e.id, "title": title, "score": e.score })
+        })
+        .collect();
+
+    println!("{}", serde_json::to_string(&truncated).expect("serialize"));
+    Ok(())
 }
 
 fn cmd_neighbors(vault: Option<PathBuf>, data_dir: Option<PathBuf>, id: &str, depth: usize, directed: bool) -> Result<(), kg_core::Error> {

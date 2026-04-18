@@ -76,6 +76,12 @@ pub enum Command {
         #[arg(long)]
         directed: bool,
     },
+    /// Rank nodes by PageRank centrality.
+    Rank {
+        /// Number of top-ranked nodes to return.
+        #[arg(long, default_value = "20")]
+        top: usize,
+    },
     /// Extract an induced subgraph around seed nodes.
     Subgraph {
         /// Seed node IDs.

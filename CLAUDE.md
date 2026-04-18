@@ -12,7 +12,7 @@ See `roadmap.md` for the full stage plan (0-8). See
 ## Commands
 
 ```bash
-cargo test                      # 210 tests (unit + integration + CLI smoke)
+cargo test                      # 244 tests (unit + integration + CLI smoke)
 cargo run --bin kg -- --help    # CLI help
 cargo run --bin kg -- parse --vault <path>           # stream NDJSON
 cargo run --bin kg -- parse --vault <path> --pretty  # envelope JSON
@@ -26,6 +26,8 @@ cargo run --bin kg -- neighbors "id" --depth 2 --directed --vault <path>
 cargo run --bin kg -- path "from" "to" --vault <path>                  # all simple paths
 cargo run --bin kg -- shared "a" "b" --vault <path>                    # shared neighbors
 cargo run --bin kg -- subgraph "id1" "id2" --depth 1 --vault <path>    # induced subgraph
+cargo run --bin kg -- rank --vault <path>                              # PageRank centrality
+cargo run --bin kg -- rank --top 10 --vault <path>                     # top-N ranked nodes
 ```
 
 ## Project layout
@@ -35,12 +37,12 @@ Cargo.toml                  # workspace: crates/core + crates/cli
 crates/core/src/
   lib.rs                    # re-exports Error; declares parser, resolve, store, indexer, graph, types, wiki_links
   error.rs                  # Error enum: NotImplemented, Io, VaultNotFound, Database, NodeNotFound
-  types.rs                  # ParsedNode, ParsedEdge, ParseEvent, SearchResult, NeighborEntry, Subgraph
-  graph.rs                  # KnowledgeGraph: from_store(), neighbors(), path(), shared(), subgraph()
+  types.rs                  # ParsedNode, ParsedEdge, ParseEvent, SearchResult, NeighborEntry, Subgraph, RankEntry
+  graph.rs                  # KnowledgeGraph: from_store(), neighbors(), path(), shared(), subgraph(), rank(), degree_centrality()
   wiki_links.rs             # RawLink, extract_wiki_links(), strip_code_constructs()
   parser.rs                 # parse_file(), parse_vault() + frontmatter/paragraph helpers
   resolve.rs                # StemLookup, resolve_edges(), resolve_name() — link resolution
-  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats, search(), all_edges(), all_nodes_metadata()
+  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats, search(), all_edges(), all_nodes_metadata(), get_meta(), set_meta(), max_mtime(), node_titles(), graph_fingerprint()
   indexer.rs                # collect_vault_files(), index_vault() — diff + orchestration
 crates/cli/src/
   main.rs                   # entry: tracing init, clap parse, dispatch, exit codes
@@ -85,10 +87,15 @@ Pipeline (Stages 1-5):
 10. `graph::KnowledgeGraph::from_store()` builds a `petgraph::DiGraph`
     from `all_nodes_metadata()` + `all_edges()`, with O(1) ID→NodeIndex
     lookup and stub tracking
-11. Four graph operations: `neighbors()` (BFS), `path()` (DFS all
+11. Four graph traversal operations: `neighbors()` (BFS), `path()` (DFS all
     simple paths), `shared()` (depth-1 intersection), `subgraph()`
     (BFS + induced edges). All default to undirected traversal;
     `--directed` restricts to outgoing edges only
+12. `graph::KnowledgeGraph::rank()` runs power-iteration PageRank
+    (damping=0.85, max_iter=100, epsilon=1e-6) on the undirected graph
+    with isolates removed. Falls back to `degree_centrality()` if
+    iteration doesn't converge. Results cached in `meta` table via
+    `graph_fingerprint()` so repeated `kg rank` calls are instant
 
 ## Conventions
 
@@ -100,7 +107,7 @@ Pipeline (Stages 1-5):
 - CLI output: always JSON on stdout, logs on stderr. Exit 0/1/2.
 - `parse`, `resolve`, and `search` stream bare NDJSON by default;
   `parse --pretty` wraps in an envelope. `index`, `stats`, `neighbors`,
-  `path`, `shared`, and `subgraph` emit a single JSON object/array.
+  `path`, `shared`, `subgraph`, and `rank` emit a single JSON object/array.
 - Tests: unit tests inline (`#[cfg(test)]`), integration tests in
   `crates/*/tests/`. Fixture vault at `crates/core/tests/fixtures/vault/`.
 - `id` = relative path from vault root (e.g. `People/Alice Smith.md`).
@@ -175,13 +182,26 @@ Pipeline (Stages 1-5):
   Excludes the two query nodes themselves from results.
 - `subgraph()` collects BFS neighborhoods from all seeds, then filters
   edges to only those with both endpoints in the included set.
-- All four graph operations default to undirected traversal (both
-  incoming + outgoing edges). `--directed` restricts to outgoing only.
+- All four graph traversal operations default to undirected traversal
+  (both incoming + outgoing edges). `--directed` restricts to outgoing only.
 - Graph query results are deterministically sorted: neighbors by
   (depth, id), paths lexicographically, shared by id, subgraph nodes
-  by id and edges by (source, target).
+  by id and edges by (source, target), rank by descending score.
+- `rank()` converts the DiGraph to undirected adjacency (deduped per
+  pair), then filters to non-isolate nodes. Self-loops are excluded
+  from the undirected view. Scores sum to 1.0.
+- `rank()` cache uses `graph_fingerprint()` = `"{nodes+stubs}:{edges}:{max_mtime}"`.
+  If fingerprint matches `rank_cache_fingerprint` in meta, cached
+  `rank_cache_data` (JSON) is used. Cache is per-process — CLI reads
+  from SQLite, computes if stale, writes back.
+- `degree_centrality()` normalizes by total degree sum (not N-1),
+  so scores also sum to 1.0.
+- `cmd_rank()` enriches `RankEntry` with titles from `node_titles()`
+  to produce `{id, title, score}` JSON objects.
+- `open_store_and_graph()` returns both `Store` and `KnowledgeGraph`
+  for commands that need both (currently only `rank`).
 
-## What's next (Stage 6)
+## What's next (Stage 7)
 
-Visualization / export: generate DOT/Mermaid output from subgraph
-results, `kg export` CLI subcommand.
+Embeddings + semantic search via shell-out (`KG_EMBED_CMD`), with
+hybrid FTS+semantic search via reciprocal rank fusion.
