@@ -62,6 +62,10 @@ fn dispatch(cli: Cli) -> Result<(), kg_core::Error> {
         Command::Index => cmd_index(cli.vault, cli.data_dir),
         Command::Stats => cmd_stats(cli.vault, cli.data_dir),
         Command::Search { query, limit } => cmd_search(cli.vault, cli.data_dir, &query, limit),
+        Command::Neighbors { id, depth, directed } => cmd_neighbors(cli.vault, cli.data_dir, &id, depth, directed),
+        Command::Path { from, to, max_depth, directed } => cmd_path(cli.vault, cli.data_dir, &from, &to, max_depth, directed),
+        Command::Shared { a, b, directed } => cmd_shared(cli.vault, cli.data_dir, &a, &b, directed),
+        Command::Subgraph { ids, depth, directed } => cmd_subgraph(cli.vault, cli.data_dir, &ids, depth, directed),
     }
 }
 
@@ -137,6 +141,43 @@ fn cmd_search(vault: Option<PathBuf>, data_dir: Option<PathBuf>, query: &str, li
         let _ = writeln!(out);
     }
 
+    Ok(())
+}
+
+fn open_graph(vault: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<kg_core::graph::KnowledgeGraph, kg_core::Error> {
+    let vault_path = require_vault(vault)?;
+    let dir = resolve_data_dir(&vault_path, data_dir);
+    let db_path = dir.join("kg.db");
+    let store = kg_core::store::Store::open(&db_path)?;
+    kg_core::graph::KnowledgeGraph::from_store(&store)
+}
+
+fn cmd_neighbors(vault: Option<PathBuf>, data_dir: Option<PathBuf>, id: &str, depth: usize, directed: bool) -> Result<(), kg_core::Error> {
+    let kg = open_graph(vault, data_dir)?;
+    let result = kg.neighbors(id, depth, directed)?;
+    println!("{}", serde_json::to_string(&result).expect("serialize"));
+    Ok(())
+}
+
+fn cmd_path(vault: Option<PathBuf>, data_dir: Option<PathBuf>, from: &str, to: &str, max_depth: usize, directed: bool) -> Result<(), kg_core::Error> {
+    let kg = open_graph(vault, data_dir)?;
+    let result = kg.path(from, to, max_depth, directed)?;
+    println!("{}", serde_json::to_string(&result).expect("serialize"));
+    Ok(())
+}
+
+fn cmd_shared(vault: Option<PathBuf>, data_dir: Option<PathBuf>, a: &str, b: &str, directed: bool) -> Result<(), kg_core::Error> {
+    let kg = open_graph(vault, data_dir)?;
+    let result = kg.shared(a, b, directed)?;
+    println!("{}", serde_json::to_string(&result).expect("serialize"));
+    Ok(())
+}
+
+fn cmd_subgraph(vault: Option<PathBuf>, data_dir: Option<PathBuf>, ids: &[String], depth: usize, directed: bool) -> Result<(), kg_core::Error> {
+    let kg = open_graph(vault, data_dir)?;
+    let seed_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let result = kg.subgraph(&seed_refs, depth, directed)?;
+    println!("{}", serde_json::to_string(&result).expect("serialize"));
     Ok(())
 }
 

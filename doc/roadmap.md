@@ -193,21 +193,50 @@ BM25 ordering, stub exclusion, limit, no-matches, CLI smoke tests
 **Goal**: actually use the graph structure. No analytics yet — just
 traversal.
 
-- Build `petgraph::Graph` lazily from the store (cache per-process).
+- New module `graph.rs`: `KnowledgeGraph` struct wrapping
+  `petgraph::DiGraph<String, ()>` + `HashMap<String, NodeIndex>` for
+  O(1) ID lookup + `HashSet<String>` for stub tracking.
+- Built once per CLI invocation via `KnowledgeGraph::from_store(&Store)`.
+  No cross-process caching — the graph is rebuilt from SQLite each time
+  (instant for vaults in the hundreds/low-thousands of nodes).
+- New `Store` methods: `all_edges() → Vec<(String, String)>`,
+  `all_nodes_metadata() → Vec<(String, bool)>`.
+- New error variant: `NodeNotFound { id: String }` — returned by all four
+  operations when a query references a node not in the graph.
+- New types in `types.rs`: `NeighborEntry { id, depth }`,
+  `SubgraphNode { id, is_stub }`, `SubgraphEdge { source, target }`,
+  `Subgraph { nodes, edges }`.
 - Operations:
-  - `neighbors(id, depth)` — BFS up to N hops, distances included.
-  - `path(a, b, max_len)` — all simple paths via DFS with depth cap.
-  - `shared(a, b)` — intersection of neighbor sets.
-  - `subgraph(seed_ids, depth)` — induced subgraph as JSON
-    `{nodes:[...], edges:[...]}`.
-- Direction: edges are directed in storage, but traversal is
-  undirected by default with an `--directed` flag.
+  - `neighbors(id, depth, directed)` — BFS with `VecDeque`. Visited set
+    initialized with the start node (excludes self-loops from results).
+    Returns `Vec<NeighborEntry>` sorted by (depth, id).
+  - `path(from, to, max_depth, directed)` — recursive DFS with visited
+    set + backtracking. `max_depth` bounds edge count (path length - 1).
+    Returns only simple paths (no repeated nodes), sorted
+    lexicographically. Same-node queries return `[[id]]`.
+  - `shared(a, b, directed)` — depth-1 neighbor set intersection.
+    Excludes the two query nodes themselves. Returns sorted `Vec<String>`.
+  - `subgraph(seeds, depth, directed)` — BFS from each seed up to depth,
+    then filters all graph edges to those with both endpoints in the
+    included set. Stubs marked `is_stub: true`. Nodes sorted by id,
+    edges sorted by (source, target).
+- Direction: all operations default to undirected (both incoming +
+  outgoing edges); `--directed` restricts to outgoing only.
 
-**CLI**: `kg neighbors <id> [--depth 2]`, `kg path <a> <b>`,
-`kg shared <a> <b>`, `kg subgraph <id>... [--depth 1]`.
+**CLI**: `kg neighbors <id> [--depth N] [--directed]`,
+`kg path <from> <to> [--max-depth N] [--directed]`,
+`kg shared <a> <b> [--directed]`,
+`kg subgraph <id>... [--depth N] [--directed]`.
+Output: single JSON object/array on stdout (not NDJSON), matching the
+`stats`/`index` pattern since graph results are bounded and complete.
 
-**Tests**: deterministic fixture graph; verify path ordering, depth caps,
-stub handling.
+**Tests**: 52 new tests — 32 unit tests in `graph.rs` (construction,
+neighbors, path, shared, subgraph with directed/undirected/edge cases),
+8 integration tests against fixture vault in `graph_test.rs`,
+4 Store method tests, 1 error serialization test, 7 CLI smoke tests.
+Total: 210 tests.
+
+[x] This stage has been implemented.
 
 ---
 

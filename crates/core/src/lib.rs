@@ -1,4 +1,5 @@
 mod error;
+pub mod graph;
 pub mod indexer;
 pub mod parser;
 pub mod resolve;

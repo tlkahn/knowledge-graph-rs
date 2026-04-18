@@ -627,3 +627,160 @@ Stage 4 added 20 new tests:
 
 Total across all stages: 158 tests (111 core lib + 7 indexer + 13 parser
 + 4 store + 2 envelope + 21 CLI).
+
+---
+
+## Stage 5 — Graph Queries
+
+Built on top of commit `96fcd1e`.
+
+### petgraph: DiGraph not Graph
+
+The edges table stores directed edges (source → target), so the natural
+representation is `petgraph::graph::DiGraph<String, ()>`. Undirected
+traversal is implemented at the query level by iterating both
+`Direction::Outgoing` and `Direction::Incoming` neighbors — not by
+converting to an undirected graph. This means the graph faithfully
+represents the underlying data while still supporting both modes.
+
+Edge weights are `()` — we don't carry context or weight through the
+graph structure. If a future stage needs weighted traversal (e.g. for
+PageRank edge weights), the type parameter can be changed without
+restructuring.
+
+### O(1) ID lookup via index map
+
+`KnowledgeGraph` maintains a `HashMap<String, NodeIndex>` alongside the
+`DiGraph`. Every query starts with `resolve_node_index(id)` which does a
+single hash lookup. Without this, finding a node by its string ID would
+require scanning all node weights — O(n) per query.
+
+The map is built during `from_store()` and never mutated after. This is
+fine because the graph is read-only within a CLI invocation.
+
+### Self-loop handling in BFS (neighbors)
+
+The fixture vault has one self-loop: `Archive/Alice Smith.md` links to
+`[[Alice Smith]]` which ambiguously resolves back to itself. BFS
+initializes the `visited` set with the start node before entering the
+loop. This means the self-loop edge is traversed but the start node is
+already marked visited, so it doesn't appear in its own neighbor list.
+
+This was an intentional design choice, not a bug — "neighbors of A"
+should not include A. The self-loop still exists in the graph and shows
+up in `subgraph` output (where it's an edge from A to A within the
+induced subgraph).
+
+### Path explosion and max_depth
+
+`path()` finds all simple paths via recursive DFS with backtracking.
+On the fixture vault (13 nodes, 21 edges), querying paths between
+well-connected nodes like `People/Bob Jones.md` →
+`Ideas/Acme Project.md` with `max_depth=5` returns ~90 paths. This is
+combinatorially expected — each intermediate node choice forks the
+search tree.
+
+The `max_depth` parameter bounds edge count (not node count), so
+`max_depth=1` means paths with at most 1 edge (direct links only).
+A `max_depth=0` with `from != to` returns empty, and `from == to`
+returns `[[from]]` as a special case before the DFS begins.
+
+The integration test originally asserted `shortest_path.len() <= 4`
+(at most 3 edges). The actual shortest path turned out to be 4 edges
+(5 nodes). Lesson: don't assume path lengths from vault topology
+without checking — the edge structure after ambiguous resolution
+creates indirect routes that aren't obvious from reading the markdown
+files.
+
+### shared() is depth-1 only
+
+The plan considered parameterizing `shared()` with a depth argument, but
+this was dropped. Shared neighbors at depth > 1 is equivalent to running
+`neighbors()` on both nodes and intersecting, which the user can compose
+themselves. Keeping `shared()` as depth-1 intersection makes it a
+focused, fast operation — O(degree(a) + degree(b)).
+
+Both query nodes are excluded from the result. Without this, `A` and `B`
+would appear as their own shared neighbors if they link to each other
+directly, which is noisy and unhelpful.
+
+### subgraph induced-edge filtering
+
+`subgraph()` collects the BFS neighborhood, then iterates ALL edges in
+the graph to find those with both endpoints in the included set. This is
+O(E) regardless of subgraph size, which is fine because the graph is
+typically small (hundreds to low thousands of edges). A more efficient
+approach would iterate only the adjacency lists of included nodes, but
+that risks double-counting edges and complicating the dedup logic.
+
+Stubs are included in traversal (they're real nodes in the graph) and
+marked `is_stub: true` in the output. This matters for vault exploration
+— seeing which linked pages don't exist yet is a feature, not a bug.
+
+### shared_directed test: understanding neighbor semantics
+
+The initial `shared_directed` test used graph edges `A→C, C→B` and
+expected `shared(A, B, directed) = [C]`. This failed because in directed
+mode, `shared()` intersects *outgoing* neighbor sets: A's outgoing is
+`{C}`, but B has no outgoing edges, so the intersection is empty. The
+fix was changing the test to `A→C, B→C` where both A and B have C as an
+outgoing neighbor.
+
+The lesson: "directed" means "follow outgoing edges only" consistently
+across all operations. This is different from "C is reachable from both"
+(which would require BFS rather than direct adjacency).
+
+### CLI output: single JSON, not NDJSON
+
+Graph query results use single-document JSON output (one `println!` with
+`serde_json::to_string`), unlike `parse`/`resolve`/`search` which stream
+NDJSON. The rationale: streaming makes sense for potentially large,
+unbounded result sets that a user might want to filter incrementally.
+Graph query results are bounded (by depth) and self-contained (a
+subgraph's nodes and edges need to be interpreted together), so a single
+document is more natural.
+
+### `open_graph` helper in main.rs
+
+The four graph commands share identical setup: require vault, resolve
+data dir, open Store, build KnowledgeGraph. Extracted into
+`open_graph(vault, data_dir) -> Result<KnowledgeGraph, Error>`. This
+follows the same pattern as `require_vault` and `resolve_data_dir` from
+Stage 3 — small focused helpers that remove copy-paste without adding
+abstraction layers.
+
+### No new Store schema changes
+
+Stage 5 reads from the existing tables via two new query methods
+(`all_edges`, `all_nodes_metadata`) but doesn't alter the schema. The
+graph is a computed projection of the SQLite data, not a new persistence
+layer. This means Stage 5 is purely additive — no migration needed, no
+risk to existing databases.
+
+### Test structure
+
+52 new tests across five locations:
+
+- **32 unit tests** in `graph.rs` `#[cfg(test)]`: organized by operation —
+  `from_store` construction (3), `neighbors` (8, covering directed/
+  undirected/depth/self-loop/isolated/nonexistent/sorting), `path` (9,
+  covering direct/two-hop/multiple/max_depth/same-node/no-connection/
+  nonexistent/directed/cycle-avoidance), `shared` (5, covering common/
+  none/excludes-self/nonexistent/directed), `subgraph` (7, covering
+  depth-0/depth-1/multiple-seeds/stubs/induced-only/nonexistent/ordering).
+  Uses manual graph construction via `build_graph()` / `build_graph_with_stubs()`
+  helpers rather than Store, isolating the graph logic from the database.
+- **8 integration tests** in `graph_test.rs`: full pipeline (index fixture
+  vault → build graph → query). Verify counts (13 nodes, 21 edges),
+  specific neighbors (Widget Theory has 5), orphan isolation, path
+  existence, shared connections, stub inclusion in subgraph, code-fence
+  link filtering through the graph layer.
+- **4 unit tests** in `store.rs`: `all_edges` (populated + empty),
+  `all_nodes_metadata` (populated + empty).
+- **1 unit test** in `error.rs`: `NodeNotFound` serialization.
+- **7 CLI smoke tests** in `cli_smoke.rs`: neighbors (valid + nonexistent +
+  missing vault), path (valid + nonexistent), shared (valid), subgraph
+  (valid with structure check).
+
+Total across all stages: 210 tests (148 core lib + 8 graph + 7 indexer +
+13 parser + 4 store + 2 envelope + 28 CLI).

@@ -13,6 +13,7 @@ tracing = { workspace = true }
 regex = { workspace = true }
 ignore = { workspace = true }
 rusqlite = { workspace = true }
+petgraph = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

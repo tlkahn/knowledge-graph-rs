@@ -313,6 +313,26 @@ impl Store {
         Ok(results)
     }
 
+    pub fn all_edges(&self) -> Result<Vec<(String, String)>, Error> {
+        let mut stmt = self.conn.prepare("SELECT source, target FROM edges ORDER BY source, target")?;
+        let edges = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(edges)
+    }
+
+    pub fn all_nodes_metadata(&self) -> Result<Vec<(String, bool)>, Error> {
+        let mut stmt = self.conn.prepare("SELECT id, is_stub FROM nodes ORDER BY id")?;
+        let nodes = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let is_stub: i64 = row.get(1)?;
+                Ok((id, is_stub != 0))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(nodes)
+    }
+
     pub fn begin_transaction(&self) -> Result<(), Error> {
         self.conn.execute_batch("BEGIN")?;
         Ok(())
@@ -815,6 +835,45 @@ mod tests {
         let new_results = store.search("NewTitle", 20).unwrap();
         assert_eq!(new_results.len(), 1);
         assert_eq!(new_results[0].title, "NewTitle");
+    }
+
+    // --- all_edges / all_nodes_metadata ---
+
+    #[test]
+    fn all_edges_returns_source_target_pairs() {
+        let store = Store::open_memory().unwrap();
+        store.insert_edge("a.md", "b.md", "").unwrap();
+        store.insert_edge("c.md", "d.md", "").unwrap();
+
+        let edges = store.all_edges().unwrap();
+        assert_eq!(edges, vec![("a.md".into(), "b.md".into()), ("c.md".into(), "d.md".into())]);
+    }
+
+    #[test]
+    fn all_edges_empty_db() {
+        let store = Store::open_memory().unwrap();
+        let edges = store.all_edges().unwrap();
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn all_nodes_metadata_returns_id_and_stub_flag() {
+        let store = Store::open_memory().unwrap();
+        let node = make_node("a.md", "A", &[], json!({}));
+        store.upsert_node(&node, 1).unwrap();
+        store.upsert_stub("Ghost").unwrap();
+
+        let meta = store.all_nodes_metadata().unwrap();
+        assert_eq!(meta.len(), 2);
+        assert!(meta.contains(&("Ghost".into(), true)));
+        assert!(meta.contains(&("a.md".into(), false)));
+    }
+
+    #[test]
+    fn all_nodes_metadata_empty_db() {
+        let store = Store::open_memory().unwrap();
+        let meta = store.all_nodes_metadata().unwrap();
+        assert!(meta.is_empty());
     }
 
     #[test]

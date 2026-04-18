@@ -319,6 +319,137 @@ fn search_requires_vault() {
     assert_eq!(value["error"]["kind"], "vault_not_found");
 }
 
+// --- neighbors command tests ---
+
+#[test]
+fn neighbors_returns_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["neighbors", "Concepts/Widget Theory.md", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert!(value.is_array());
+    let arr = value.as_array().unwrap();
+    assert!(!arr.is_empty());
+    assert!(arr[0].get("id").is_some());
+    assert!(arr[0].get("depth").is_some());
+}
+
+#[test]
+fn neighbors_nonexistent_id_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["neighbors", "nonexistent.md", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["ok"], Value::Bool(false));
+    assert_eq!(value["error"]["kind"], "node_not_found");
+}
+
+#[test]
+fn neighbors_requires_vault() {
+    let assert = kg().args(["neighbors", "x"]).assert().code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["error"]["kind"], "vault_not_found");
+}
+
+// --- path command tests ---
+
+#[test]
+fn path_returns_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["path", "People/Bob Jones.md", "Ideas/Acme Project.md", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert!(value.is_array());
+}
+
+#[test]
+fn path_nonexistent_id_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["path", "nonexistent.md", "People/Alice Smith.md", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["error"]["kind"], "node_not_found");
+}
+
+// --- shared command tests ---
+
+#[test]
+fn shared_returns_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["shared", "People/Alice Smith.md", "People/Bob Jones.md", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert!(value.is_array());
+}
+
+// --- subgraph command tests ---
+
+#[test]
+fn subgraph_returns_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["subgraph", "Ideas/Acme Project.md", "--depth", "1", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert!(value.get("nodes").is_some());
+    assert!(value.get("edges").is_some());
+    assert!(value["nodes"].is_array());
+    assert!(value["edges"].is_array());
+}
+
 fn regex_lite(_pat: &str) -> impl Fn(&str) -> bool {
     |s: &str| {
         let Some(rest) = s.strip_prefix("kg ") else {

@@ -12,7 +12,7 @@ See `roadmap.md` for the full stage plan (0-8). See
 ## Commands
 
 ```bash
-cargo test                      # 158 tests (unit + integration + CLI smoke)
+cargo test                      # 210 tests (unit + integration + CLI smoke)
 cargo run --bin kg -- --help    # CLI help
 cargo run --bin kg -- parse --vault <path>           # stream NDJSON
 cargo run --bin kg -- parse --vault <path> --pretty  # envelope JSON
@@ -21,6 +21,11 @@ cargo run --bin kg -- index --vault <path>           # index vault to SQLite
 cargo run --bin kg -- stats --vault <path>           # show graph statistics
 cargo run --bin kg -- search "query" --vault <path>  # full-text search (FTS5)
 cargo run --bin kg -- search "query" --limit 5 --vault <path>
+cargo run --bin kg -- neighbors "People/Alice Smith.md" --vault <path>  # BFS neighbors
+cargo run --bin kg -- neighbors "id" --depth 2 --directed --vault <path>
+cargo run --bin kg -- path "from" "to" --vault <path>                  # all simple paths
+cargo run --bin kg -- shared "a" "b" --vault <path>                    # shared neighbors
+cargo run --bin kg -- subgraph "id1" "id2" --depth 1 --vault <path>    # induced subgraph
 ```
 
 ## Project layout
@@ -28,13 +33,14 @@ cargo run --bin kg -- search "query" --limit 5 --vault <path>
 ```
 Cargo.toml                  # workspace: crates/core + crates/cli
 crates/core/src/
-  lib.rs                    # re-exports Error; declares parser, resolve, store, indexer, types, wiki_links
-  error.rs                  # Error enum: NotImplemented, Io, VaultNotFound, Database
-  types.rs                  # ParsedNode, ParsedEdge, ParseEvent, SearchResult
+  lib.rs                    # re-exports Error; declares parser, resolve, store, indexer, graph, types, wiki_links
+  error.rs                  # Error enum: NotImplemented, Io, VaultNotFound, Database, NodeNotFound
+  types.rs                  # ParsedNode, ParsedEdge, ParseEvent, SearchResult, NeighborEntry, Subgraph
+  graph.rs                  # KnowledgeGraph: from_store(), neighbors(), path(), shared(), subgraph()
   wiki_links.rs             # RawLink, extract_wiki_links(), strip_code_constructs()
   parser.rs                 # parse_file(), parse_vault() + frontmatter/paragraph helpers
   resolve.rs                # StemLookup, resolve_edges(), resolve_name() — link resolution
-  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats, search()
+  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats, search(), all_edges(), all_nodes_metadata()
   indexer.rs                # collect_vault_files(), index_vault() — diff + orchestration
 crates/cli/src/
   main.rs                   # entry: tracing init, clap parse, dispatch, exit codes
@@ -45,6 +51,7 @@ crates/core/tests/
   parser_test.rs            # integration tests against fixture vault
   store_test.rs             # integration tests for Store (in-memory SQLite)
   indexer_test.rs            # round-trip indexer tests against fixture vault
+  graph_test.rs             # integration tests for KnowledgeGraph against fixture vault
 crates/cli/tests/
   cli_smoke.rs              # CLI binary tests via assert_cmd
 ```
@@ -55,7 +62,7 @@ Business logic lives in `crates/core` (`kg-core`). The CLI crate is a
 thin shell: parse args, call core, format output. Stages add modules to
 core and subcommands to CLI in lock-step.
 
-Pipeline (Stages 1-3):
+Pipeline (Stages 1-5):
 1. `parser::parse_vault()` walks vault via `ignore` crate (skips hidden dirs)
 2. Per file: `parser::parse_file()` splits frontmatter via `gray_matter`,
    deserializes YAML into `serde_json::Value`, extracts wiki-links
@@ -75,18 +82,25 @@ Pipeline (Stages 1-3):
 9. `store::Store::search()` queries FTS5 with BM25 ranking, snippet
    extraction, and stub exclusion. Schema version 2 adds `tags_text`
    column and `nodes_fts` virtual table with auto-sync triggers
+10. `graph::KnowledgeGraph::from_store()` builds a `petgraph::DiGraph`
+    from `all_nodes_metadata()` + `all_edges()`, with O(1) ID→NodeIndex
+    lookup and stub tracking
+11. Four graph operations: `neighbors()` (BFS), `path()` (DFS all
+    simple paths), `shared()` (depth-1 intersection), `subgraph()`
+    (BFS + induced edges). All default to undirected traversal;
+    `--directed` restricts to outgoing edges only
 
 ## Conventions
 
 - **Rust 2024 edition**, toolchain 1.94, resolver v3.
 - Errors: `kg_core::Error` enum with `thiserror` (variants: NotImplemented,
-  Io, VaultNotFound, Database). Implements `Serialize` (`kind` + `message`
+  Io, VaultNotFound, Database, NodeNotFound). Implements `Serialize` (`kind` + `message`
   fields). CLI wraps in `Envelope` for stdout. `From<rusqlite::Error>` maps
   to `Database`.
 - CLI output: always JSON on stdout, logs on stderr. Exit 0/1/2.
 - `parse`, `resolve`, and `search` stream bare NDJSON by default;
-  `parse --pretty` wraps in an envelope. `index` and `stats` emit a
-  single JSON object.
+  `parse --pretty` wraps in an envelope. `index`, `stats`, `neighbors`,
+  `path`, `shared`, and `subgraph` emit a single JSON object/array.
 - Tests: unit tests inline (`#[cfg(test)]`), integration tests in
   `crates/*/tests/`. Fixture vault at `crates/core/tests/fixtures/vault/`.
 - `id` = relative path from vault root (e.g. `People/Alice Smith.md`).
@@ -107,6 +121,7 @@ Pipeline (Stages 1-3):
 | thiserror 2 | Error enum derive |
 | tracing | structured logging to stderr |
 | rusqlite 0.35 | SQLite (bundled) for knowledge graph persistence |
+| petgraph 0.8 | directed graph for traversal queries (neighbors, paths, subgraph) |
 | tempfile 3 | temporary directories for tests (dev-dep) |
 
 ## Gotchas for future sessions
@@ -149,8 +164,24 @@ Pipeline (Stages 1-3):
   resolved set. This is simpler than incremental edge updates.
 - The `tempfile` crate is a dev-dep only — tests that mutate vault
   files copy the fixture vault to a tempdir first.
+- `KnowledgeGraph` is built once per CLI invocation via
+  `from_store(&Store)`. No caching beyond the process lifetime.
+- `neighbors()` BFS initializes the visited set with the start node,
+  so self-loops don't add the start node as its own neighbor.
+- `path()` uses recursive DFS with backtracking. `max_depth` bounds
+  the number of edges (path length - 1). Returns only simple paths
+  (no repeated nodes). Results sorted lexicographically.
+- `shared()` is depth-1 only — intersects immediate neighbor sets.
+  Excludes the two query nodes themselves from results.
+- `subgraph()` collects BFS neighborhoods from all seeds, then filters
+  edges to only those with both endpoints in the included set.
+- All four graph operations default to undirected traversal (both
+  incoming + outgoing edges). `--directed` restricts to outgoing only.
+- Graph query results are deterministically sorted: neighbors by
+  (depth, id), paths lexicographically, shared by id, subgraph nodes
+  by id and edges by (source, target).
 
-## What's next (Stage 5)
+## What's next (Stage 6)
 
-Query layer: graph traversal queries (neighbors, paths, backlinks),
-`kg query` CLI subcommand, optional depth/filter parameters.
+Visualization / export: generate DOT/Mermaid output from subgraph
+results, `kg export` CLI subcommand.

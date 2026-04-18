@@ -22,4 +22,5 @@ rusqlite = { version = "0.35", features = ["bundled"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+petgraph = "0.8"
 kg-core = { path = "crates/core" }

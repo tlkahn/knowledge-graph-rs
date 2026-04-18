@@ -18,6 +18,9 @@ pub enum Error {
 
     #[error("database error: {message}")]
     Database { message: String },
+
+    #[error("node not found: {id}")]
+    NodeNotFound { id: String },
 }
 
 impl Error {
@@ -27,6 +30,7 @@ impl Error {
             Error::Io { .. } => "io",
             Error::VaultNotFound { .. } => "vault_not_found",
             Error::Database { .. } => "database",
+            Error::NodeNotFound { .. } => "node_not_found",
         }
     }
 }
@@ -95,6 +99,17 @@ mod tests {
         assert_eq!(value["kind"], "database");
         let message = value["message"].as_str().expect("message is string");
         assert!(message.contains("table not found"), "got {message:?}");
+    }
+
+    #[test]
+    fn node_not_found_serializes() {
+        let err = Error::NodeNotFound {
+            id: "missing.md".into(),
+        };
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["kind"], "node_not_found");
+        let message = value["message"].as_str().expect("message is string");
+        assert!(message.contains("missing.md"), "got {message:?}");
     }
 
     #[test]

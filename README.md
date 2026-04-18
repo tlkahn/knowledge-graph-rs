@@ -6,8 +6,9 @@ Parses markdown files with YAML frontmatter, extracts wiki-link relationships,
 resolves links to canonical node IDs, and indexes the resulting graph into
 SQLite for persistent, incremental querying.
 Full-text search is built in via SQLite FTS5 with BM25 ranking and excerpt
-extraction. Designed to be composed via pipes — every subcommand emits JSON
-to stdout.
+extraction. Graph traversal queries (neighbors, paths, shared connections,
+subgraph extraction) are powered by petgraph. Designed to be composed via
+pipes — every subcommand emits JSON to stdout.
 
 ## Quick start
 
@@ -36,10 +37,30 @@ kg search "distributed systems" --vault ~/my-vault
 # Limit results
 kg search "engineer" --limit 5 --vault ~/my-vault
 
+# Find neighbors of a node (BFS, depth 1 by default)
+kg neighbors "People/Alice Smith.md" --vault ~/my-vault
+
+# Multi-hop neighbors
+kg neighbors "People/Alice Smith.md" --depth 2 --vault ~/my-vault
+
+# Find all simple paths between two nodes
+kg path "People/Alice Smith.md" "Ideas/Acme Project.md" --vault ~/my-vault
+
+# Shared neighbors of two nodes
+kg shared "People/Alice Smith.md" "People/Bob Jones.md" --vault ~/my-vault
+
+# Extract an induced subgraph around seed nodes
+kg subgraph "Concepts/Widget Theory.md" "Ideas/Acme Project.md" --depth 1 --vault ~/my-vault
+
+# Directed traversal (outgoing edges only)
+kg neighbors "People/Alice Smith.md" --directed --vault ~/my-vault
+
 # Pipe to jq
 kg parse --vault ~/my-vault | jq 'select(.type=="node") | .title'
 kg resolve "WT" --vault ~/my-vault | jq '.id'
 kg search "Alice" --vault ~/my-vault | jq '.excerpt'
+kg neighbors "People/Alice Smith.md" --vault ~/my-vault | jq '.[].id'
+kg subgraph "Concepts/Widget Theory.md" --vault ~/my-vault | jq '.nodes[] | select(.is_stub) | .id'
 ```
 
 The vault path can also be set via `KG_VAULT_PATH` environment variable.
@@ -94,6 +115,45 @@ Scores are BM25 values (more negative = more relevant). Excerpts highlight match
 {"nodes":42,"stubs":3,"edges":128,"tags":15}
 ```
 
+**Neighbors output** — array of entries sorted by (depth, id):
+
+```json
+[
+  {"id": "Concepts/Widget Theory.md", "depth": 1},
+  {"id": "People/Bob Jones.md", "depth": 1},
+  {"id": "Ideas/Acme Project.md", "depth": 2}
+]
+```
+
+**Path output** — array of simple paths, sorted lexicographically:
+
+```json
+[
+  ["People/Alice Smith.md", "Concepts/Widget Theory.md", "Ideas/Acme Project.md"],
+  ["People/Alice Smith.md", "Ideas/Acme Project.md"]
+]
+```
+
+**Shared output** — sorted array of shared neighbor IDs:
+
+```json
+["Concepts/Widget Theory.md", "Ideas/Acme Project.md"]
+```
+
+**Subgraph output** — induced subgraph with stub marking:
+
+```json
+{
+  "nodes": [
+    {"id": "Ideas/Acme Project.md", "is_stub": false},
+    {"id": "Nonexistent Page", "is_stub": true}
+  ],
+  "edges": [
+    {"source": "Ideas/Acme Project.md", "target": "Nonexistent Page"}
+  ]
+}
+```
+
 Errors always return `{"ok":false,"error":{"kind":"...","message":"..."}}` with a non-zero exit code.
 
 ## What gets parsed
@@ -116,6 +176,17 @@ Wiki links like `[[Alice Smith]]` are resolved to canonical node IDs (e.g. `Peop
 
 Ambiguous links (multiple files with the same basename, no path qualifier) pick the first match alphabetically and emit a warning.
 
+## Graph traversal
+
+After indexing, the knowledge graph can be queried as a directed graph. All traversal commands default to **undirected** mode (following both incoming and outgoing edges); pass `--directed` to restrict to outgoing edges only.
+
+- **`kg neighbors`** — BFS from a node up to `--depth N` hops (default 1). Returns each reachable node with its hop distance. Self-loops are excluded from results.
+- **`kg path`** — finds all simple paths (no repeated nodes) between two nodes, bounded by `--max-depth N` edges (default 5). Paths are sorted lexicographically for deterministic output.
+- **`kg shared`** — intersects the depth-1 neighbor sets of two nodes. Useful for finding common connections. The two query nodes themselves are excluded from results.
+- **`kg subgraph`** — BFS-expands from one or more seed nodes up to `--depth N`, then extracts the induced subgraph (only edges where both endpoints are in the expanded set). Stub nodes (unresolved link targets) are marked `is_stub: true`.
+
+Querying a nonexistent node ID returns `{"ok":false,"error":{"kind":"node_not_found",...}}` with exit code 1.
+
 ## Persistence and incremental indexing
 
 `kg index` builds a SQLite database (default: `<vault>/.kg/kg.db`) containing the full knowledge graph. Subsequent runs are incremental: only files whose mtime has changed since the last index are re-parsed. Deleted files are cleaned up, and new files are added.
@@ -132,8 +203,8 @@ Because adding or removing a node can change how wiki-links resolve across the e
 | 1 — Parser | Done | Vault walker, frontmatter, wiki-links, NDJSON streaming |
 | 2 — Link resolver | Done | Resolve `[[target]]` to canonical node IDs, `kg resolve` subcommand |
 | 3 — Store + indexer | Done | SQLite persistence, incremental mtime-based re-indexing, `kg index` + `kg stats` |
-| 4 — Keyword search | Done | FTS5 full-text search with BM25 ranking, snippet excerpts, `kg search` (158 tests) |
-| 5 — Graph queries | Planned | Neighbors, paths, shared connections, subgraph extraction |
+| 4 — Keyword search | Done | FTS5 full-text search with BM25 ranking, snippet excerpts, `kg search` |
+| 5 — Graph queries | Done | BFS neighbors, DFS paths, shared connections, subgraph extraction via petgraph (210 tests) |
 | 6 — PageRank | Planned | Ranking on largest connected component |
 | 7 — Embeddings | Planned | Semantic search via external embedder (`KG_EMBED_CMD`) |
 
