@@ -8,6 +8,8 @@ use std::process::ExitCode;
 use clap::{Parser, error::ErrorKind};
 use tracing_subscriber::EnvFilter;
 
+use tracing::info;
+
 use crate::cli::{Cli, Command};
 use crate::envelope::{Envelope, emit_stdout};
 
@@ -169,9 +171,11 @@ fn cmd_rank(vault: Option<PathBuf>, data_dir: Option<PathBuf>, top: usize) -> Re
     let cached_fp = store.get_meta("rank_cache_fingerprint")?;
 
     let all_entries: Vec<kg_core::types::RankEntry> = if cached_fp.as_deref() == Some(&fingerprint) {
+        info!("rank cache hit");
         let data = store.get_meta("rank_cache_data")?.unwrap_or_default();
         serde_json::from_str(&data).unwrap_or_else(|_| kg.rank(usize::MAX))
     } else {
+        info!("rank cache miss, computing");
         let entries = kg.rank(usize::MAX);
         if let Ok(json) = serde_json::to_string(&entries) {
             let _ = store.set_meta("rank_cache_fingerprint", &fingerprint);

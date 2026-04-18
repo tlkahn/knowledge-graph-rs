@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use kg_core::indexer::{collect_vault_files, index_vault};
 use kg_core::store::Store;
+use tracing_test::traced_test;
 
 fn fixture_vault() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault")
@@ -163,4 +164,32 @@ fn full_lifecycle_index_reindex_touch_delete() {
     let s4 = index_vault(vault, &mut store).unwrap();
     assert_eq!(s4.deleted, 1);
     assert_eq!(store.stats().unwrap().nodes, initial_stats.nodes - 1);
+}
+
+// --- tracing tests ---
+
+#[traced_test]
+#[test]
+fn index_logs_start_complete() {
+    let mut store = Store::open_memory().unwrap();
+    let _ = index_vault(&fixture_vault(), &mut store).unwrap();
+    assert!(logs_contain("indexing vault"));
+    assert!(logs_contain("indexing complete"));
+}
+
+#[traced_test]
+#[test]
+fn reindex_noop_logs_unchanged() {
+    let mut store = Store::open_memory().unwrap();
+    index_vault(&fixture_vault(), &mut store).unwrap();
+    let _ = index_vault(&fixture_vault(), &mut store).unwrap();
+    assert!(logs_contain("vault unchanged, skipping reindex"));
+}
+
+#[traced_test]
+#[test]
+fn index_logs_debug_diff() {
+    let mut store = Store::open_memory().unwrap();
+    let _ = index_vault(&fixture_vault(), &mut store).unwrap();
+    assert!(logs_contain("index diff computed"));
 }

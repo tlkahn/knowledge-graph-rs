@@ -4,6 +4,8 @@ use std::path::Path;
 use rusqlite::Connection;
 use serde::Serialize;
 
+use tracing::{info, debug};
+
 use crate::error::Error;
 use crate::resolve::{self, ResolvedEdge, LinkResolution};
 use crate::types::{ParsedNode, SearchResult};
@@ -22,6 +24,7 @@ pub struct Stats {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, Error> {
+        info!(path = %path.display(), "opening store");
         let conn = Connection::open(path)?;
         let store = Self { conn };
         store.migrate()?;
@@ -29,6 +32,7 @@ impl Store {
     }
 
     pub fn open_memory() -> Result<Self, Error> {
+        debug!("opening in-memory store");
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
         store.migrate()?;
@@ -39,6 +43,7 @@ impl Store {
         self.conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
+        debug!("creating schema tables");
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY,
@@ -85,6 +90,7 @@ impl Store {
         let version = self.schema_version()?;
 
         if version < 2 {
+            info!(from = 1, to = 2, "migrating schema");
             self.conn.execute_batch(
                 "ALTER TABLE nodes ADD COLUMN tags_text TEXT DEFAULT '';"
             )?;
@@ -292,6 +298,7 @@ impl Store {
     }
 
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<SearchResult>, Error> {
+        info!(query, limit, "searching");
         let mut stmt = self.conn.prepare(
             "SELECT n.id, n.title, bm25(nodes_fts) AS score,
                     snippet(nodes_fts, -1, '[', ']', '...', 64) AS excerpt
@@ -311,6 +318,7 @@ impl Store {
             })
         })?.collect::<Result<Vec<_>, _>>()?;
 
+        debug!(results = results.len(), "search complete");
         Ok(results)
     }
 
@@ -394,6 +402,7 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tracing_test::traced_test;
 
     fn make_node(id: &str, title: &str, tags: &[&str], fm: serde_json::Value) -> ParsedNode {
         ParsedNode {
@@ -1014,6 +1023,35 @@ mod tests {
         let fp1 = store.graph_fingerprint().unwrap();
         let fp2 = store.graph_fingerprint().unwrap();
         assert_eq!(fp1, fp2);
+    }
+
+    // --- tracing tests ---
+
+    #[traced_test]
+    #[test]
+    fn open_memory_logs() {
+        let _store = Store::open_memory().unwrap();
+        assert!(logs_contain("opening in-memory store"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn open_file_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let _store = Store::open(&db_path).unwrap();
+        assert!(logs_contain("opening store"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn search_logs() {
+        let store = Store::open_memory().unwrap();
+        let node = make_node("a.md", "Alpha", &[], json!({}));
+        store.upsert_node(&node, 1).unwrap();
+        let _ = store.search("Alpha", 20).unwrap();
+        assert!(logs_contain("searching"));
+        assert!(logs_contain("search complete"));
     }
 
     #[test]

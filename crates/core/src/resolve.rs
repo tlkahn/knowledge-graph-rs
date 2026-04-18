@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use tracing::{info, debug};
+
 use crate::types::{ParsedEdge, ParsedNode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +109,7 @@ impl StemLookup {
 }
 
 pub fn resolve_edges(nodes: &[ParsedNode], edges: &[ParsedEdge]) -> Vec<ResolvedEdge> {
+    info!(edges = edges.len(), "resolving edges");
     let node_ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
     let lookup = StemLookup::build(&node_ids);
 
@@ -120,6 +123,7 @@ pub fn resolve_edges(nodes: &[ParsedNode], edges: &[ParsedEdge]) -> Vec<Resolved
             LinkResolution::Ambiguous { picked, .. } => picked.clone(),
             LinkResolution::Unresolved => edge.target_raw.clone(),
         };
+        debug!(source = %edge.source, target_raw = %edge.target_raw, "edge resolved");
         let key = (edge.source.clone(), resolved_target);
         if seen.insert(key) {
             result.push(ResolvedEdge {
@@ -132,6 +136,7 @@ pub fn resolve_edges(nodes: &[ParsedNode], edges: &[ParsedEdge]) -> Vec<Resolved
     }
 
     result.sort_by(|a, b| (&a.source, &a.target_raw).cmp(&(&b.source, &b.target_raw)));
+    info!(resolved = result.len(), "edge resolution complete");
     result
 }
 
@@ -145,6 +150,7 @@ pub fn resolve_name(query: &str, nodes: &[ParsedNode]) -> Vec<NameMatch> {
         .map(|n| NameMatch { id: n.id.clone(), title: n.title.clone(), kind: MatchKind::Id })
         .collect();
     if !id_matches.is_empty() {
+        debug!(query, matches = id_matches.len(), "name resolved");
         return id_matches;
     }
 
@@ -155,6 +161,7 @@ pub fn resolve_name(query: &str, nodes: &[ParsedNode]) -> Vec<NameMatch> {
         .map(|n| NameMatch { id: n.id.clone(), title: n.title.clone(), kind: MatchKind::Exact })
         .collect();
     if !exact.is_empty() {
+        debug!(query, matches = exact.len(), "name resolved");
         return exact;
     }
 
@@ -165,6 +172,7 @@ pub fn resolve_name(query: &str, nodes: &[ParsedNode]) -> Vec<NameMatch> {
         .map(|n| NameMatch { id: n.id.clone(), title: n.title.clone(), kind: MatchKind::CaseInsensitive })
         .collect();
     if !ci.is_empty() {
+        debug!(query, matches = ci.len(), "name resolved");
         return ci;
     }
 
@@ -179,15 +187,18 @@ pub fn resolve_name(query: &str, nodes: &[ParsedNode]) -> Vec<NameMatch> {
         .map(|n| NameMatch { id: n.id.clone(), title: n.title.clone(), kind: MatchKind::Alias })
         .collect();
     if !alias.is_empty() {
+        debug!(query, matches = alias.len(), "name resolved");
         return alias;
     }
 
     // Tier 5: Substring match on title
-    nodes
+    let result: Vec<_> = nodes
         .iter()
         .filter(|n| n.title.to_lowercase().contains(&query_lower))
         .map(|n| NameMatch { id: n.id.clone(), title: n.title.clone(), kind: MatchKind::Substring })
-        .collect()
+        .collect();
+    debug!(query, matches = result.len(), "name resolved");
+    result
 }
 
 pub(crate) fn extract_aliases(fm: &serde_json::Value) -> Vec<String> {
@@ -208,6 +219,7 @@ pub fn stem_of(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     // --- Cycle 1: stem_of ---
 
@@ -509,5 +521,25 @@ mod tests {
         let matches = resolve_name("People/Alice Smith.md", &nodes);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, MatchKind::Id);
+    }
+
+    // --- tracing tests ---
+
+    #[traced_test]
+    #[test]
+    fn resolve_edges_logs_info() {
+        let nodes = [make_node("A.md"), make_node("Dir/B.md")];
+        let edges = [make_edge("A.md", "B", "links to [[B]]")];
+        let _ = resolve_edges(&nodes, &edges);
+        assert!(logs_contain("resolving edges"));
+        assert!(logs_contain("edge resolution complete"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn resolve_name_logs_debug() {
+        let nodes = [make_node_full("People/Alice.md", "Alice", serde_json::json!({}))];
+        let _ = resolve_name("Alice", &nodes);
+        assert!(logs_contain("name resolved"));
     }
 }

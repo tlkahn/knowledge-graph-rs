@@ -3,7 +3,7 @@ use std::path::Path;
 use gray_matter::Matter;
 use gray_matter::engine::YAML;
 use ignore::WalkBuilder;
-use tracing::warn;
+use tracing::{warn, info, debug};
 
 use crate::error::Error;
 use crate::types::{ParsedEdge, ParsedNode, ParseEvent};
@@ -20,6 +20,8 @@ pub fn parse_file(vault_path: &Path, file_path: &Path) -> Result<(ParsedNode, Ve
         .unwrap_or(file_path)
         .to_string_lossy()
         .to_string();
+
+    debug!(id = %id, "parsing file");
 
     let (frontmatter, body) = parse_file_content(&content);
     let tags = extract_tags(&frontmatter);
@@ -57,8 +59,12 @@ pub fn parse_vault(vault_path: &Path) -> Result<Vec<ParseEvent>, Error> {
         });
     }
 
+    info!(vault = %vault_path.display(), "parsing vault");
+
     let mut events = Vec::new();
     let walker = WalkBuilder::new(vault_path).build();
+    let mut node_count = 0usize;
+    let mut edge_count = 0usize;
 
     for entry in walker {
         let entry = entry.map_err(|e| Error::Io {
@@ -73,11 +79,14 @@ pub fn parse_vault(vault_path: &Path) -> Result<Vec<ParseEvent>, Error> {
 
         let (node, edges) = parse_file(vault_path, path)?;
         events.push(ParseEvent::Node(node));
+        node_count += 1;
         for edge in edges {
             events.push(ParseEvent::Edge(edge));
+            edge_count += 1;
         }
     }
 
+    info!(nodes = node_count, edges = edge_count, "parse complete");
     Ok(events)
 }
 
@@ -174,6 +183,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use tracing_test::traced_test;
 
     // --- frontmatter parsing ---
 
@@ -304,5 +314,26 @@ mod tests {
         let vault = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
         let file = vault.join("nonexistent.md");
         assert!(parse_file(&vault, &file).is_err());
+    }
+
+    // --- tracing tests ---
+
+    #[traced_test]
+    #[test]
+    fn parse_vault_logs_start_and_complete() {
+        let vault = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let _events = parse_vault(&vault).unwrap();
+        assert!(logs_contain("parsing vault"));
+        assert!(logs_contain("parse complete"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn parse_file_logs_debug_id() {
+        let vault = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let file = vault.join("People/Alice Smith.md");
+        let _ = parse_file(&vault, &file).unwrap();
+        assert!(logs_contain("parsing file"));
+        assert!(logs_contain("People/Alice Smith.md"));
     }
 }

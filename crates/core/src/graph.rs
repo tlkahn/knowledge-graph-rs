@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
+use tracing::{info, debug};
 
 use crate::error::Error;
 use crate::store::Store;
@@ -15,6 +16,7 @@ pub struct KnowledgeGraph {
 
 impl KnowledgeGraph {
     pub fn from_store(store: &Store) -> Result<Self, Error> {
+        info!("building knowledge graph");
         let mut graph = DiGraph::new();
         let mut index = HashMap::new();
         let mut stubs = HashSet::new();
@@ -33,6 +35,7 @@ impl KnowledgeGraph {
             }
         }
 
+        info!(nodes = graph.node_count(), edges = graph.edge_count(), stubs = stubs.len(), "graph built");
         Ok(Self { graph, index, stubs })
     }
 
@@ -57,6 +60,7 @@ impl KnowledgeGraph {
         depth: usize,
         directed: bool,
     ) -> Result<Vec<NeighborEntry>, Error> {
+        debug!(id, depth, directed, "finding neighbors");
         let start = self.resolve_node_index(id)?;
         let mut visited = HashSet::new();
         visited.insert(start);
@@ -89,6 +93,7 @@ impl KnowledgeGraph {
         }
 
         result.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.id.cmp(&b.id)));
+        debug!(found = result.len(), "neighbors found");
         Ok(result)
     }
 
@@ -99,6 +104,7 @@ impl KnowledgeGraph {
         max_depth: usize,
         directed: bool,
     ) -> Result<Vec<Vec<String>>, Error> {
+        debug!(from, to, max_depth, directed, "finding paths");
         let start = self.resolve_node_index(from)?;
         let end = self.resolve_node_index(to)?;
 
@@ -113,6 +119,7 @@ impl KnowledgeGraph {
         self.dfs_all_paths(start, end, max_depth, directed, &mut visited, &mut path_stack, &mut results);
 
         results.sort();
+        debug!(paths = results.len(), "paths found");
         Ok(results)
     }
 
@@ -159,6 +166,7 @@ impl KnowledgeGraph {
         b: &str,
         directed: bool,
     ) -> Result<Vec<String>, Error> {
+        debug!(a, b, directed, "finding shared neighbors");
         let a_ni = self.resolve_node_index(a)?;
         let b_ni = self.resolve_node_index(b)?;
 
@@ -182,6 +190,7 @@ impl KnowledgeGraph {
             .collect();
 
         common.sort();
+        debug!(shared = common.len(), "shared neighbors found");
         Ok(common)
     }
 
@@ -191,6 +200,7 @@ impl KnowledgeGraph {
         depth: usize,
         directed: bool,
     ) -> Result<Subgraph, Error> {
+        debug!(seeds = seeds.len(), depth, directed, "extracting subgraph");
         let mut included = HashSet::new();
 
         for &seed in seeds {
@@ -246,6 +256,7 @@ impl KnowledgeGraph {
             .collect();
         edges.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.target.cmp(&b.target)));
 
+        debug!(nodes = nodes.len(), edges = edges.len(), "subgraph extracted");
         Ok(Subgraph { nodes, edges })
     }
 
@@ -290,6 +301,7 @@ impl KnowledgeGraph {
     }
 
     pub fn rank(&self, top: usize) -> Vec<RankEntry> {
+        info!(top, "computing PageRank");
         let mut undirected_adj: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
         let mut seen_pairs: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
 
@@ -374,8 +386,11 @@ impl KnowledgeGraph {
         }
 
         if !converged {
+            debug!("PageRank did not converge, falling back to degree centrality");
             return self.degree_centrality(top);
         }
+
+        debug!("PageRank converged");
 
         let mut entries: Vec<RankEntry> = active
             .iter()
@@ -400,6 +415,7 @@ impl KnowledgeGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     fn build_graph(nodes: &[&str], edges: &[(&str, &str)]) -> KnowledgeGraph {
         build_graph_with_stubs(nodes, &[], edges)
@@ -851,6 +867,50 @@ mod tests {
         let result = kg.degree_centrality(10);
         let sum: f64 = result.iter().map(|e| e.score).sum();
         assert!((sum - 1.0).abs() < 1e-4, "scores sum to {sum}");
+    }
+
+    // --- tracing tests ---
+
+    #[traced_test]
+    #[test]
+    fn from_store_logs() {
+        let store = crate::store::Store::open_memory().unwrap();
+        let n = crate::types::ParsedNode {
+            id: "a.md".into(),
+            title: "A".into(),
+            tags: vec![],
+            frontmatter: serde_json::json!({}),
+            first_paragraph: String::new(),
+        };
+        store.upsert_node(&n, 1).unwrap();
+        let _kg = KnowledgeGraph::from_store(&store).unwrap();
+        assert!(logs_contain("building knowledge graph"));
+        assert!(logs_contain("graph built"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn neighbors_logs() {
+        let kg = build_graph(&["A", "B"], &[("A", "B")]);
+        let _ = kg.neighbors("A", 1, false).unwrap();
+        assert!(logs_contain("finding neighbors"));
+        assert!(logs_contain("neighbors found"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn rank_logs() {
+        let kg = build_graph(&["A", "B"], &[("A", "B")]);
+        let _ = kg.rank(10);
+        assert!(logs_contain("computing PageRank"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn rank_convergence_logs() {
+        let kg = build_graph(&["A", "B", "C"], &[("A", "B"), ("B", "C"), ("C", "A")]);
+        let _ = kg.rank(10);
+        assert!(logs_contain("PageRank converged"));
     }
 
     #[test]

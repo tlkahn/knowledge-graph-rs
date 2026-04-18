@@ -3,6 +3,7 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 use serde::Serialize;
+use tracing::{info, debug};
 
 use crate::error::Error;
 use crate::parser;
@@ -63,10 +64,12 @@ pub fn collect_vault_files(vault: &Path) -> Result<Vec<(String, i64)>, Error> {
     }
 
     files.sort_by(|a, b| a.0.cmp(&b.0));
+    debug!(files = files.len(), "collected vault files");
     Ok(files)
 }
 
 pub fn index_vault(vault: &Path, store: &mut Store) -> Result<IndexSummary, Error> {
+    info!(vault = %vault.display(), "indexing vault");
     let fs_files = collect_vault_files(vault)?;
     let synced = store.all_synced_paths()?;
     let synced_set: HashSet<&str> = synced.iter().map(|s| s.as_str()).collect();
@@ -91,7 +94,10 @@ pub fn index_vault(vault: &Path, store: &mut Store) -> Result<IndexSummary, Erro
         }
     }
 
+    debug!(added = new_files.len(), changed = changed_files.len(), removed = deleted.len(), "index diff computed");
+
     if new_files.is_empty() && changed_files.is_empty() && deleted.is_empty() {
+        info!("vault unchanged, skipping reindex");
         return Ok(IndexSummary {
             added: 0,
             changed: 0,
@@ -157,10 +163,15 @@ pub fn index_vault(vault: &Path, store: &mut Store) -> Result<IndexSummary, Erro
 
     store.commit()?;
 
+    let added = new_files.len();
+    let changed = changed_files.len();
+    let removed = deleted.len();
+    info!(added, changed, removed, "indexing complete");
+
     Ok(IndexSummary {
-        added: new_files.len(),
-        changed: changed_files.len(),
-        deleted: deleted.len(),
+        added,
+        changed,
+        deleted: removed,
         stubs: stub_count,
     })
 }
