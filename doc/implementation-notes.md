@@ -440,3 +440,190 @@ Stage 3 added 41 new tests:
 
 Total across all stages: 138 tests (96 core lib + 7 indexer + 13 parser +
 3 store + 2 envelope + 17 CLI).
+
+---
+
+## Stage 4 — FTS5 Keyword Search
+
+Built on top of commit `647b130`.
+
+### Schema versioning as a migration driver
+
+Stage 3 planted a `meta(key, value)` table with `schema_version = '1'`.
+Stage 4 leans on this for its v1 → v2 migration. The `migrate()` method
+runs unconditionally on every `Store::open()`:
+
+1. Create base v1 tables via `CREATE TABLE IF NOT EXISTS` (idempotent).
+2. `INSERT OR IGNORE INTO meta` sets version to `'1'` for fresh DBs.
+3. Read `schema_version`. If < 2: run the ALTER/backfill/version-bump
+   sequence.
+4. Create FTS5 table + triggers via `IF NOT EXISTS` (idempotent for
+   both fresh-v2 and reopened-v2 databases).
+5. If the migration just ran (version was < 2): `INSERT INTO
+   nodes_fts(nodes_fts) VALUES ('rebuild')` to populate FTS from the
+   backfilled `tags_text`.
+
+This means fresh databases go through the v1 → v2 path too (the ALTER
+TABLE on an empty `nodes` table is instant). One code path, no branching
+between "fresh" and "upgrade" — the simplicity is worth the no-op ALTER.
+
+### Why `tags_text` instead of a JOIN or separate FTS table
+
+Three options were considered:
+
+**(a) Denormalized `tags_text` column + single FTS table** — chosen.
+Adding `tags_text TEXT DEFAULT ''` to `nodes` and including it in the
+FTS5 column list keeps the trigger definitions trivial (three triggers,
+each referencing `new.tags_text` / `old.tags_text`). The column is
+populated in `upsert_node()` via `node.tags.join(" ")`.
+
+**(b) FTS over a VIEW joining `nodes` and `tags`** — rejected. FTS5's
+`content=` option requires a real table, not a view. You can fake it
+with `content=''` (contentless) but then `snippet()` doesn't work (no
+content to extract from). We need snippets.
+
+**(c) Separate `tags_fts` table** — rejected. Querying across two FTS
+tables requires `UNION` or application-level rank merging. BM25 scores
+from different FTS tables aren't directly comparable. One table with all
+three columns lets FTS5 do a single-pass `MATCH` with unified ranking.
+
+### FTS5 content-sync mode
+
+`content=nodes, content_rowid=rowid` tells FTS5 to read content from
+the `nodes` table when running `snippet()` or `highlight()`. The FTS
+index itself stores only tokens and positions, not the original text.
+This avoids doubling storage for `title` and `first_paragraph`.
+
+The trade-off: we must keep the FTS index manually synchronized with
+the `nodes` table. Three triggers handle this:
+
+- **AFTER INSERT**: straight insert into `nodes_fts`.
+- **AFTER DELETE**: FTS5's special delete syntax (`INSERT INTO
+  nodes_fts(nodes_fts, rowid, ...) VALUES ('delete', ...)`) removes
+  the old entry by replaying the old tokens.
+- **AFTER UPDATE**: delete-then-insert (same as above, two statements).
+
+SQLite's `INSERT OR REPLACE` (used by `upsert_node`) is implemented as
+DELETE + INSERT under the hood. So both the DELETE trigger and the INSERT
+trigger fire, correctly updating the FTS index. For a new node (no
+conflict), only the INSERT trigger fires. No special handling needed.
+
+### `bm25()` returns negative scores
+
+This surprised us initially. FTS5's `bm25()` returns values where more
+negative means more relevant (it's actually the negative of the BM25
+score). `ORDER BY bm25(nodes_fts)` ascending puts the best matches
+first. The `SearchResult.score` field exposes these raw negative values
+to consumers — wrapping or negating them would add confusion without
+benefit, since the ordering semantic is what matters.
+
+### Snippet highlight markers: `[` / `]`
+
+The `snippet()` function takes configurable highlight markers. We chose
+`[` and `]` because:
+
+- JSON-safe (no escaping needed).
+- Lightweight in terminal output.
+- Easy for downstream consumers to regex-replace with ANSI codes or HTML
+  if desired: `s/\[/\x1b[1m/g; s/\]/\x1b[0m/g`.
+
+The alternative (ANSI escape codes directly) would clutter JSON output
+and break consumers that parse the excerpt as plain text.
+
+### `snippet()` column index -1
+
+Passing `-1` as the column index tells FTS5 to automatically pick the
+column with the best matching snippet. This is better than hardcoding
+a column because a search for a tag name should excerpt from `tags_text`,
+while a search for a phrase should excerpt from `first_paragraph`. The
+automatic selection handles this without branching logic.
+
+The `64` parameter is the maximum number of tokens in the snippet. This
+produces excerpts of roughly 1-2 sentences — enough context to assess
+relevance without overwhelming the output.
+
+### Stub exclusion
+
+Stubs have `is_stub=1`, empty title, empty `first_paragraph`, and empty
+`tags_text`. They still get inserted into the FTS index (the trigger fires
+on any INSERT into `nodes`), but they're excluded from search results via
+`WHERE n.is_stub = 0` in the JOIN. This is simpler than conditionally
+suppressing the trigger — stubs have no searchable content anyway, so
+even without the filter they'd rarely match a real query.
+
+### `upsert_stub` and the `tags_text` DEFAULT
+
+`upsert_stub` doesn't specify `tags_text` in its INSERT statement.
+SQLite fills in the `DEFAULT ''` before the trigger fires. The FTS insert
+trigger sees `new.tags_text = ''` and indexes an empty string, which is
+correct — stubs have no tags. No code change was needed for stubs.
+
+### The v1 migration backfill
+
+For existing v1 databases with data:
+
+```sql
+UPDATE nodes SET tags_text = COALESCE(
+    (SELECT group_concat(tag, ' ') FROM tags WHERE tags.node_id = nodes.id),
+    ''
+);
+```
+
+The `COALESCE(..., '')` handles nodes with no tags (the subquery returns
+NULL when `group_concat` has no rows). After the backfill, `INSERT INTO
+nodes_fts(nodes_fts) VALUES ('rebuild')` tells FTS5 to re-read all rows
+from the `nodes` table and rebuild its index from scratch.
+
+This is a one-time cost. After migration, the triggers keep FTS in sync
+incrementally.
+
+### `rusqlite` bundled includes FTS5
+
+The `rusqlite = { features = ["bundled"] }` feature compiles SQLite from
+C source. The `libsqlite3-sys` build script enables
+`-DSQLITE_ENABLE_FTS5` by default when bundling. No additional feature
+flag was needed — this was confirmed empirically (the FTS5 `CREATE
+VIRTUAL TABLE` succeeded on the first try).
+
+### Test patterns for schema migration
+
+The v1 → v2 migration test manually constructs a v1 database by opening
+a raw `rusqlite::Connection`, creating the v1 schema, inserting data,
+then closing it. It then opens the same file via `Store::open()` and
+asserts:
+
+- `schema_version() == 2`
+- `tags_text` is backfilled (non-empty for nodes that had tags)
+- FTS search returns results for the pre-existing data
+
+This pattern is portable to future v2 → v3 migrations: create a vN
+database manually, open it through `Store`, verify the upgrade.
+
+### CLI output pattern
+
+`kg search` follows the bare-NDJSON pattern established by `parse` and
+`resolve`. One `SearchResult` JSON object per line, no envelope. Empty
+output with exit 0 means "no matches" — not an error.
+
+```bash
+kg search "Alice" --vault ~/vault          # NDJSON results
+kg search "Alice" --vault ~/vault | wc -l  # count matches
+kg search "Alice" --limit 1 --vault ~/vault | jq '.excerpt'
+```
+
+### Test counts
+
+Stage 4 added 20 new tests:
+
+- **2 unit tests** in `types.rs`: `SearchResult` serialization and
+  round-trip.
+- **14 unit tests** in `store.rs`: schema v2, FTS table existence,
+  `tags_text` population, FTS trigger correctness (insert/delete/update),
+  search by title/tag/paragraph, BM25 ordering, stub exclusion, limit,
+  no-matches, v1→v2 migration with backfill.
+- **1 integration test** in `store_test.rs`: search on empty DB.
+- **4 CLI smoke tests** in `cli_smoke.rs`: search returns results,
+  limit works, no-match returns empty, missing vault errors.
+
+Total across all stages: 158 tests (111 core lib + 7 indexer + 13 parser
++ 4 store + 2 envelope + 21 CLI).

@@ -23,6 +23,14 @@ pub enum ParseEvent {
     Edge(ParsedEdge),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchResult {
+    pub id: String,
+    pub title: String,
+    pub score: f64,
+    pub excerpt: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +95,37 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["type"], "node");
         assert_eq!(value["id"], "test.md");
+    }
+
+    #[test]
+    fn search_result_serializes_to_json() {
+        let result = SearchResult {
+            id: "People/Alice Smith.md".into(),
+            title: "Alice Smith".into(),
+            score: -2.5,
+            excerpt: "Lead [engineer] on the Widget Theory project".into(),
+        };
+        let value = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(value["id"], "People/Alice Smith.md");
+        assert_eq!(value["title"], "Alice Smith");
+        assert_eq!(value["score"], -2.5);
+        assert_eq!(
+            value["excerpt"],
+            "Lead [engineer] on the Widget Theory project"
+        );
+    }
+
+    #[test]
+    fn search_result_round_trips() {
+        let result = SearchResult {
+            id: "test.md".into(),
+            title: "Test".into(),
+            score: -1.0,
+            excerpt: "some [match] here".into(),
+        };
+        let json_str = serde_json::to_string(&result).expect("serialize");
+        let back: SearchResult = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back, result);
     }
 
     #[test]

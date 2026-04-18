@@ -34,4 +34,12 @@ pub enum Command {
     Index,
     /// Show statistics about the indexed knowledge graph.
     Stats,
+    /// Full-text search across indexed nodes.
+    Search {
+        /// The search query (FTS5 syntax).
+        query: String,
+        /// Maximum number of results.
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
 }

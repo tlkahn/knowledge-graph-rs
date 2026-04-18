@@ -61,6 +61,7 @@ fn dispatch(cli: Cli) -> Result<(), kg_core::Error> {
         Command::Resolve { name } => cmd_resolve(cli.vault, &name),
         Command::Index => cmd_index(cli.vault, cli.data_dir),
         Command::Stats => cmd_stats(cli.vault, cli.data_dir),
+        Command::Search { query, limit } => cmd_search(cli.vault, cli.data_dir, &query, limit),
     }
 }
 
@@ -119,6 +120,23 @@ fn cmd_stats(vault: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<(), kg
     let store = kg_core::store::Store::open(&db_path)?;
     let stats = store.stats()?;
     println!("{}", serde_json::to_string(&stats).expect("serialize"));
+    Ok(())
+}
+
+fn cmd_search(vault: Option<PathBuf>, data_dir: Option<PathBuf>, query: &str, limit: i64) -> Result<(), kg_core::Error> {
+    let vault_path = require_vault(vault)?;
+    let dir = resolve_data_dir(&vault_path, data_dir);
+    let db_path = dir.join("kg.db");
+    let store = kg_core::store::Store::open(&db_path)?;
+    let results = store.search(query, limit)?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for result in &results {
+        serde_json::to_writer(&mut out, result).expect("serialize");
+        let _ = writeln!(out);
+    }
+
     Ok(())
 }
 

@@ -5,7 +5,9 @@ A fast, read-only knowledge graph tool for Obsidian vaults, written in Rust.
 Parses markdown files with YAML frontmatter, extracts wiki-link relationships,
 resolves links to canonical node IDs, and indexes the resulting graph into
 SQLite for persistent, incremental querying.
-Designed to be composed via pipes — every subcommand emits JSON to stdout.
+Full-text search is built in via SQLite FTS5 with BM25 ranking and excerpt
+extraction. Designed to be composed via pipes — every subcommand emits JSON
+to stdout.
 
 ## Quick start
 
@@ -28,9 +30,16 @@ kg parse --vault ~/my-vault --pretty
 # Resolve a name to matching nodes
 kg resolve "Alice Smith" --vault ~/my-vault
 
+# Full-text search with BM25 ranking
+kg search "distributed systems" --vault ~/my-vault
+
+# Limit results
+kg search "engineer" --limit 5 --vault ~/my-vault
+
 # Pipe to jq
 kg parse --vault ~/my-vault | jq 'select(.type=="node") | .title'
 kg resolve "WT" --vault ~/my-vault | jq '.id'
+kg search "Alice" --vault ~/my-vault | jq '.excerpt'
 ```
 
 The vault path can also be set via `KG_VAULT_PATH` environment variable.
@@ -69,6 +78,15 @@ Match kinds: `id`, `exact`, `case_insensitive`, `alias`, `substring` (checked in
 ```json
 {"added":42,"changed":0,"deleted":0,"stubs":3}
 ```
+
+**Search output** — one result per line, ranked by relevance:
+
+```jsonl
+{"id":"People/Alice Smith.md","title":"Alice Smith","score":-1.53,"excerpt":"[Alice] Smith"}
+{"id":"Concepts/Widget Theory.md","title":"Widget Theory","score":-0.76,"excerpt":"Originally proposed by [[[Alice] Smith]]..."}
+```
+
+Scores are BM25 values (more negative = more relevant). Excerpts highlight matches with `[brackets]`.
 
 **Stats output** — current graph counts:
 
@@ -113,8 +131,8 @@ Because adding or removing a node can change how wiki-links resolve across the e
 | 0 — Skeleton | Done | Workspace, CLI envelope protocol, `parse` stub |
 | 1 — Parser | Done | Vault walker, frontmatter, wiki-links, NDJSON streaming |
 | 2 — Link resolver | Done | Resolve `[[target]]` to canonical node IDs, `kg resolve` subcommand |
-| 3 — Store + indexer | Done | SQLite persistence, incremental mtime-based re-indexing, `kg index` + `kg stats` (138 tests) |
-| 4 — Keyword search | Planned | FTS5 full-text search with excerpts |
+| 3 — Store + indexer | Done | SQLite persistence, incremental mtime-based re-indexing, `kg index` + `kg stats` |
+| 4 — Keyword search | Done | FTS5 full-text search with BM25 ranking, snippet excerpts, `kg search` (158 tests) |
 | 5 — Graph queries | Planned | Neighbors, paths, shared connections, subgraph extraction |
 | 6 — PageRank | Planned | Ranking on largest connected component |
 | 7 — Embeddings | Planned | Semantic search via external embedder (`KG_EMBED_CMD`) |

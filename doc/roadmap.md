@@ -156,16 +156,35 @@ deleted). Full lifecycle integration test.
 
 **Goal**: `kg search "query"` returns matching nodes with excerpts.
 
-- Add FTS5 virtual table over `title || first_paragraph || tags`.
-- Maintain via triggers or explicit sync in the indexer — pick triggers
-  for simplicity.
-- Excerpts via FTS5's built-in `snippet()` function.
-- Result shape: `SearchResult { id, title, score, excerpt }`.
+- Schema migration v1 → v2: add denormalized `tags_text TEXT` column on
+  `nodes`, create `nodes_fts` FTS5 virtual table (content-sync'd to
+  `nodes` via `content=nodes, content_rowid=rowid`), three auto-sync
+  triggers (INSERT/DELETE/UPDATE). Existing v1 databases upgrade
+  transparently on next `Store::open` — `ALTER TABLE` adds the column,
+  backfills from `tags` table, rebuilds FTS index. No forced re-index.
+- FTS5 indexes three columns: `title`, `first_paragraph`, `tags_text`.
+  `tags_text` is a space-joined denormalization of the `tags` table,
+  populated in `upsert_node()`. Denormalization chosen over a subquery
+  or separate FTS table because it keeps the trigger definitions simple
+  and lets FTS5 weigh all three signals in a single `MATCH`.
+- Stubs excluded from search results (`WHERE n.is_stub = 0`).
+- BM25 ranking via `bm25(nodes_fts)` (negative values; sort ascending
+  for best-first). Excerpts via `snippet(nodes_fts, -1, '[', ']',
+  '...', 64)` — column index -1 lets FTS5 pick the best column; `[`/`]`
+  as highlight markers (lightweight, no ANSI in JSON output); ~64 tokens.
+- Result type: `SearchResult { id, title, score, excerpt }`.
+- Default limit: 20.
 
-**CLI**: `kg search <query> [--limit N]`.
+**CLI**: `kg search <query> [--limit N]`. Output: bare NDJSON (one
+`SearchResult` per line), matching the `parse`/`resolve` streaming style.
 
-**Tests**: query coverage for tag match, title match, body match, BM25
-ordering.
+**Tests**: 20 new tests — `SearchResult` serialization, schema v2,
+v1→v2 migration + backfill, `tags_text` population, FTS trigger
+correctness (insert/delete/update), search by title/tag/paragraph,
+BM25 ordering, stub exclusion, limit, no-matches, CLI smoke tests
+(results/limit/no-matches/missing-vault).
+
+[x] This stage has been implemented.
 
 ---
 

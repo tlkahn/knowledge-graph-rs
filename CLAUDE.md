@@ -12,13 +12,15 @@ See `roadmap.md` for the full stage plan (0-8). See
 ## Commands
 
 ```bash
-cargo test                      # 138 tests (unit + integration + CLI smoke)
+cargo test                      # 158 tests (unit + integration + CLI smoke)
 cargo run --bin kg -- --help    # CLI help
 cargo run --bin kg -- parse --vault <path>           # stream NDJSON
 cargo run --bin kg -- parse --vault <path> --pretty  # envelope JSON
 cargo run --bin kg -- resolve "Alice Smith" --vault <path>  # name resolution
 cargo run --bin kg -- index --vault <path>           # index vault to SQLite
 cargo run --bin kg -- stats --vault <path>           # show graph statistics
+cargo run --bin kg -- search "query" --vault <path>  # full-text search (FTS5)
+cargo run --bin kg -- search "query" --limit 5 --vault <path>
 ```
 
 ## Project layout
@@ -28,11 +30,11 @@ Cargo.toml                  # workspace: crates/core + crates/cli
 crates/core/src/
   lib.rs                    # re-exports Error; declares parser, resolve, store, indexer, types, wiki_links
   error.rs                  # Error enum: NotImplemented, Io, VaultNotFound, Database
-  types.rs                  # ParsedNode, ParsedEdge, ParseEvent
+  types.rs                  # ParsedNode, ParsedEdge, ParseEvent, SearchResult
   wiki_links.rs             # RawLink, extract_wiki_links(), strip_code_constructs()
   parser.rs                 # parse_file(), parse_vault() + frontmatter/paragraph helpers
   resolve.rs                # StemLookup, resolve_edges(), resolve_name() — link resolution
-  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats
+  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats, search()
   indexer.rs                # collect_vault_files(), index_vault() — diff + orchestration
 crates/cli/src/
   main.rs                   # entry: tracing init, clap parse, dispatch, exit codes
@@ -67,8 +69,12 @@ Pipeline (Stages 1-3):
 7. `indexer::index_vault()` orchestrates incremental indexing:
    diff filesystem vs stored mtimes → parse changed → re-resolve all edges →
    persist to SQLite via `store::Store`
-8. `store::Store` manages SQLite (6 tables: nodes, tags, aliases, edges,
-   sync, meta) with WAL mode. Default DB at `<vault>/.kg/kg.db`
+8. `store::Store` manages SQLite (6 tables + FTS5: nodes, tags, aliases,
+   edges, sync, meta, nodes_fts) with WAL mode. Default DB at
+   `<vault>/.kg/kg.db`
+9. `store::Store::search()` queries FTS5 with BM25 ranking, snippet
+   extraction, and stub exclusion. Schema version 2 adds `tags_text`
+   column and `nodes_fts` virtual table with auto-sync triggers
 
 ## Conventions
 
@@ -78,8 +84,9 @@ Pipeline (Stages 1-3):
   fields). CLI wraps in `Envelope` for stdout. `From<rusqlite::Error>` maps
   to `Database`.
 - CLI output: always JSON on stdout, logs on stderr. Exit 0/1/2.
-- `parse` and `resolve` stream bare NDJSON by default; `parse --pretty`
-  wraps in an envelope. `index` and `stats` emit a single JSON object.
+- `parse`, `resolve`, and `search` stream bare NDJSON by default;
+  `parse --pretty` wraps in an envelope. `index` and `stats` emit a
+  single JSON object.
 - Tests: unit tests inline (`#[cfg(test)]`), integration tests in
   `crates/*/tests/`. Fixture vault at `crates/core/tests/fixtures/vault/`.
 - `id` = relative path from vault root (e.g. `People/Alice Smith.md`).
@@ -125,6 +132,14 @@ Pipeline (Stages 1-3):
   strings and `Value::String` (single alias), mirroring `extract_tags`.
 - `Store::open()` runs `PRAGMA journal_mode=WAL` and `foreign_keys=ON`.
   `migrate()` uses `CREATE TABLE IF NOT EXISTS` so re-opening is safe.
+  Schema versioning (meta table) drives v1→v2 migration (FTS5).
+- FTS5 content-sync mode (`content=nodes`): triggers keep `nodes_fts`
+  in sync. `INSERT OR REPLACE` fires DELETE+INSERT triggers correctly.
+  `tags_text` is a denormalized space-joined copy of tags for FTS.
+- `bm25()` returns negative scores (more negative = better match).
+  `search()` sorts ascending so best results come first.
+- `snippet()` uses `[`/`]` as highlight markers (no ANSI in JSON output).
+  Column index -1 lets FTS5 pick the best matching column.
 - `index_vault()` re-parses ALL files for edge resolution even on
   incremental runs (a new/deleted node can change resolution of links
   in unchanged files). Only the diff determines which nodes to upsert.
@@ -135,7 +150,7 @@ Pipeline (Stages 1-3):
 - The `tempfile` crate is a dev-dep only — tests that mutate vault
   files copy the fixture vault to a tempdir first.
 
-## What's next (Stage 4)
+## What's next (Stage 5)
 
 Query layer: graph traversal queries (neighbors, paths, backlinks),
 `kg query` CLI subcommand, optional depth/filter parameters.

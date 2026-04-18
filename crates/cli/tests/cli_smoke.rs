@@ -245,6 +245,80 @@ fn stats_on_empty_db_shows_zeros() {
     assert_eq!(value["edges"], 0);
 }
 
+// --- search command tests ---
+
+#[test]
+fn search_after_index_returns_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["search", "Alice", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!lines.is_empty(), "expected search results for 'Alice'");
+    for line in &lines {
+        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSON: {e}: {line}"));
+        assert!(v.get("id").is_some());
+        assert!(v.get("title").is_some());
+        assert!(v.get("score").is_some());
+        assert!(v.get("excerpt").is_some());
+    }
+}
+
+#[test]
+fn search_with_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["search", "Alice", "--limit", "1", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(lines.len() <= 1, "expected at most 1 result with --limit 1, got {}", lines.len());
+}
+
+#[test]
+fn search_no_matches_empty_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["search", "zzzznonexistent", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(lines.is_empty(), "expected no results");
+}
+
+#[test]
+fn search_requires_vault() {
+    let assert = kg().args(["search", "test"]).assert().code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["ok"], Value::Bool(false));
+    assert_eq!(value["error"]["kind"], "vault_not_found");
+}
+
 fn regex_lite(_pat: &str) -> impl Fn(&str) -> bool {
     |s: &str| {
         let Some(rest) = s.strip_prefix("kg ") else {
