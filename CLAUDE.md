@@ -12,11 +12,13 @@ See `roadmap.md` for the full stage plan (0-8). See
 ## Commands
 
 ```bash
-cargo test                      # 97 tests (unit + integration + CLI smoke)
+cargo test                      # 138 tests (unit + integration + CLI smoke)
 cargo run --bin kg -- --help    # CLI help
 cargo run --bin kg -- parse --vault <path>           # stream NDJSON
 cargo run --bin kg -- parse --vault <path> --pretty  # envelope JSON
 cargo run --bin kg -- resolve "Alice Smith" --vault <path>  # name resolution
+cargo run --bin kg -- index --vault <path>           # index vault to SQLite
+cargo run --bin kg -- stats --vault <path>           # show graph statistics
 ```
 
 ## Project layout
@@ -24,12 +26,14 @@ cargo run --bin kg -- resolve "Alice Smith" --vault <path>  # name resolution
 ```
 Cargo.toml                  # workspace: crates/core + crates/cli
 crates/core/src/
-  lib.rs                    # re-exports Error; declares parser, resolve, types, wiki_links
-  error.rs                  # Error enum: NotImplemented, Io, VaultNotFound
+  lib.rs                    # re-exports Error; declares parser, resolve, store, indexer, types, wiki_links
+  error.rs                  # Error enum: NotImplemented, Io, VaultNotFound, Database
   types.rs                  # ParsedNode, ParsedEdge, ParseEvent
   wiki_links.rs             # RawLink, extract_wiki_links(), strip_code_constructs()
-  parser.rs                 # parse_vault() + frontmatter/paragraph helpers
+  parser.rs                 # parse_file(), parse_vault() + frontmatter/paragraph helpers
   resolve.rs                # StemLookup, resolve_edges(), resolve_name() — link resolution
+  store.rs                  # Store (SQLite): schema, CRUD, queries, Stats
+  indexer.rs                # collect_vault_files(), index_vault() — diff + orchestration
 crates/cli/src/
   main.rs                   # entry: tracing init, clap parse, dispatch, exit codes
   cli.rs                    # Cli struct (clap derive): --vault, --data-dir, subcommands
@@ -37,6 +41,8 @@ crates/cli/src/
 crates/core/tests/
   fixtures/vault/           # 11 .md files + .obsidian/ + attachments/ (excluded by walker)
   parser_test.rs            # integration tests against fixture vault
+  store_test.rs             # integration tests for Store (in-memory SQLite)
+  indexer_test.rs            # round-trip indexer tests against fixture vault
 crates/cli/tests/
   cli_smoke.rs              # CLI binary tests via assert_cmd
 ```
@@ -47,11 +53,10 @@ Business logic lives in `crates/core` (`kg-core`). The CLI crate is a
 thin shell: parse args, call core, format output. Stages add modules to
 core and subcommands to CLI in lock-step.
 
-Pipeline (Stages 1-2):
+Pipeline (Stages 1-3):
 1. `parser::parse_vault()` walks vault via `ignore` crate (skips hidden dirs)
-2. Per file: `gray_matter` splits frontmatter from body, deserializes
-   YAML directly into `serde_json::Value` — malformed YAML falls back
-   to manual `---` delimiter stripping
+2. Per file: `parser::parse_file()` splits frontmatter via `gray_matter`,
+   deserializes YAML into `serde_json::Value`, extracts wiki-links
 3. `wiki_links::extract_wiki_links()` strips code constructs then regex-matches
    `[[target]]` / `[[target|alias]]` / `[[target#section|alias]]`
 4. Returns `Vec<ParseEvent>` (tagged enum: Node or Edge)
@@ -59,15 +64,22 @@ Pipeline (Stages 1-2):
    `StemLookup` (exact-path → basename-unique → path-suffix disambiguation)
 6. `resolve::resolve_name()` provides query-time 5-tier name matching
    (id → exact → case-insensitive → alias → substring)
+7. `indexer::index_vault()` orchestrates incremental indexing:
+   diff filesystem vs stored mtimes → parse changed → re-resolve all edges →
+   persist to SQLite via `store::Store`
+8. `store::Store` manages SQLite (6 tables: nodes, tags, aliases, edges,
+   sync, meta) with WAL mode. Default DB at `<vault>/.kg/kg.db`
 
 ## Conventions
 
 - **Rust 2024 edition**, toolchain 1.94, resolver v3.
-- Errors: `kg_core::Error` enum with `thiserror`. Implements `Serialize`
-  (`kind` + `message` fields). CLI wraps in `Envelope` for stdout.
+- Errors: `kg_core::Error` enum with `thiserror` (variants: NotImplemented,
+  Io, VaultNotFound, Database). Implements `Serialize` (`kind` + `message`
+  fields). CLI wraps in `Envelope` for stdout. `From<rusqlite::Error>` maps
+  to `Database`.
 - CLI output: always JSON on stdout, logs on stderr. Exit 0/1/2.
 - `parse` and `resolve` stream bare NDJSON by default; `parse --pretty`
-  wraps in an envelope.
+  wraps in an envelope. `index` and `stats` emit a single JSON object.
 - Tests: unit tests inline (`#[cfg(test)]`), integration tests in
   `crates/*/tests/`. Fixture vault at `crates/core/tests/fixtures/vault/`.
 - `id` = relative path from vault root (e.g. `People/Alice Smith.md`).
@@ -87,6 +99,8 @@ Pipeline (Stages 1-2):
 | serde / serde_json | serialization throughout |
 | thiserror 2 | Error enum derive |
 | tracing | structured logging to stderr |
+| rusqlite 0.35 | SQLite (bundled) for knowledge graph persistence |
+| tempfile 3 | temporary directories for tests (dev-dep) |
 
 ## Gotchas for future sessions
 
@@ -109,9 +123,19 @@ Pipeline (Stages 1-2):
   Substring hits for the same node.
 - Alias extraction from frontmatter handles both `Value::Array` of
   strings and `Value::String` (single alias), mirroring `extract_tags`.
+- `Store::open()` runs `PRAGMA journal_mode=WAL` and `foreign_keys=ON`.
+  `migrate()` uses `CREATE TABLE IF NOT EXISTS` so re-opening is safe.
+- `index_vault()` re-parses ALL files for edge resolution even on
+  incremental runs (a new/deleted node can change resolution of links
+  in unchanged files). Only the diff determines which nodes to upsert.
+- Stub node `id` is the raw `target_raw` string, not a `.md` path.
+  Stubs have `is_stub=1` and empty title/frontmatter/first_paragraph.
+- `replace_all_edges()` deletes ALL edges then re-inserts from the
+  resolved set. This is simpler than incremental edge updates.
+- The `tempfile` crate is a dev-dep only — tests that mutate vault
+  files copy the fixture vault to a tempdir first.
 
-## What's next (Stage 3)
+## What's next (Stage 4)
 
-Store + indexer: SQLite persistence via `better-sqlite3`, incremental
-mtime-based re-indexing, stub node creation for unresolved targets,
-`resolve_name` adapter over stored data.
+Query layer: graph traversal queries (neighbors, paths, backlinks),
+`kg query` CLI subcommand, optional depth/filter parameters.

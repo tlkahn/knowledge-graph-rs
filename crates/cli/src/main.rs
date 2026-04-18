@@ -59,13 +59,13 @@ fn dispatch(cli: Cli) -> Result<(), kg_core::Error> {
     match cli.command {
         Command::Parse { pretty } => cmd_parse(cli.vault, pretty),
         Command::Resolve { name } => cmd_resolve(cli.vault, &name),
+        Command::Index => cmd_index(cli.vault, cli.data_dir),
+        Command::Stats => cmd_stats(cli.vault, cli.data_dir),
     }
 }
 
 fn cmd_resolve(vault: Option<PathBuf>, name: &str) -> Result<(), kg_core::Error> {
-    let vault_path = vault.ok_or_else(|| kg_core::Error::VaultNotFound {
-        path: "(provide --vault or set KG_VAULT_PATH)".into(),
-    })?;
+    let vault_path = require_vault(vault)?;
 
     let events = kg_core::parser::parse_vault(&vault_path)?;
     let nodes: Vec<_> = events
@@ -88,10 +88,42 @@ fn cmd_resolve(vault: Option<PathBuf>, name: &str) -> Result<(), kg_core::Error>
     Ok(())
 }
 
-fn cmd_parse(vault: Option<PathBuf>, pretty: bool) -> Result<(), kg_core::Error> {
-    let vault_path = vault.ok_or_else(|| kg_core::Error::VaultNotFound {
+fn resolve_data_dir(vault: &PathBuf, data_dir: Option<PathBuf>) -> PathBuf {
+    data_dir.unwrap_or_else(|| vault.join(".kg"))
+}
+
+fn require_vault(vault: Option<PathBuf>) -> Result<PathBuf, kg_core::Error> {
+    vault.ok_or_else(|| kg_core::Error::VaultNotFound {
         path: "(provide --vault or set KG_VAULT_PATH)".into(),
+    })
+}
+
+fn cmd_index(vault: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<(), kg_core::Error> {
+    let vault_path = require_vault(vault)?;
+    let dir = resolve_data_dir(&vault_path, data_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| kg_core::Error::Io {
+        source: e,
+        path: dir.clone(),
     })?;
+    let db_path = dir.join("kg.db");
+    let mut store = kg_core::store::Store::open(&db_path)?;
+    let summary = kg_core::indexer::index_vault(&vault_path, &mut store)?;
+    println!("{}", serde_json::to_string(&summary).expect("serialize"));
+    Ok(())
+}
+
+fn cmd_stats(vault: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<(), kg_core::Error> {
+    let vault_path = require_vault(vault)?;
+    let dir = resolve_data_dir(&vault_path, data_dir);
+    let db_path = dir.join("kg.db");
+    let store = kg_core::store::Store::open(&db_path)?;
+    let stats = store.stats()?;
+    println!("{}", serde_json::to_string(&stats).expect("serialize"));
+    Ok(())
+}
+
+fn cmd_parse(vault: Option<PathBuf>, pretty: bool) -> Result<(), kg_core::Error> {
+    let vault_path = require_vault(vault)?;
 
     let events = kg_core::parser::parse_vault(&vault_path)?;
 

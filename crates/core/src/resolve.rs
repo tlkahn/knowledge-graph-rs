@@ -190,7 +190,7 @@ pub fn resolve_name(query: &str, nodes: &[ParsedNode]) -> Vec<NameMatch> {
         .collect()
 }
 
-fn extract_aliases(fm: &serde_json::Value) -> Vec<String> {
+pub(crate) fn extract_aliases(fm: &serde_json::Value) -> Vec<String> {
     match fm.get("aliases") {
         Some(serde_json::Value::Array(arr)) => {
             arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()

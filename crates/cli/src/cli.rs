@@ -30,4 +30,8 @@ pub enum Command {
         /// The name to resolve (node ID, title, alias, or substring).
         name: String,
     },
+    /// Index (or re-index) a vault into a local SQLite database.
+    Index,
+    /// Show statistics about the indexed knowledge graph.
+    Stats,
 }

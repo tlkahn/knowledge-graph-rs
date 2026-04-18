@@ -12,3 +12,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
 ignore = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

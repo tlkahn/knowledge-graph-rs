@@ -9,6 +9,47 @@ use crate::error::Error;
 use crate::types::{ParsedEdge, ParsedNode, ParseEvent};
 use crate::wiki_links::extract_wiki_links;
 
+pub fn parse_file(vault_path: &Path, file_path: &Path) -> Result<(ParsedNode, Vec<ParsedEdge>), Error> {
+    let content = std::fs::read_to_string(file_path).map_err(|e| Error::Io {
+        source: e,
+        path: file_path.to_path_buf(),
+    })?;
+
+    let id = file_path
+        .strip_prefix(vault_path)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .to_string();
+
+    let (frontmatter, body) = parse_file_content(&content);
+    let tags = extract_tags(&frontmatter);
+    let title = extract_title(&frontmatter, &id);
+    let first_paragraph = extract_first_paragraph(&body);
+
+    let node = ParsedNode {
+        id: id.clone(),
+        title,
+        tags,
+        frontmatter,
+        first_paragraph,
+    };
+
+    let links = extract_wiki_links(&content);
+    let edges: Vec<ParsedEdge> = links
+        .into_iter()
+        .map(|link| {
+            let context = find_context(&link.target, &body);
+            ParsedEdge {
+                source: id.clone(),
+                target_raw: link.target,
+                context,
+            }
+        })
+        .collect();
+
+    Ok((node, edges))
+}
+
 pub fn parse_vault(vault_path: &Path) -> Result<Vec<ParseEvent>, Error> {
     if !vault_path.is_dir() {
         return Err(Error::VaultNotFound {
@@ -30,38 +71,10 @@ pub fn parse_vault(vault_path: &Path) -> Result<Vec<ParseEvent>, Error> {
             continue;
         }
 
-        let content = std::fs::read_to_string(path).map_err(|e| Error::Io {
-            source: e,
-            path: path.to_path_buf(),
-        })?;
-
-        let id = path
-            .strip_prefix(vault_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-
-        let (frontmatter, body) = parse_file_content(&content);
-        let tags = extract_tags(&frontmatter);
-        let title = extract_title(&frontmatter, &id);
-        let first_paragraph = extract_first_paragraph(&body);
-
-        events.push(ParseEvent::Node(ParsedNode {
-            id: id.clone(),
-            title,
-            tags,
-            frontmatter,
-            first_paragraph,
-        }));
-
-        let links = extract_wiki_links(&content);
-        for link in links {
-            let context = find_context(&link.target, &body);
-            events.push(ParseEvent::Edge(ParsedEdge {
-                source: id.clone(),
-                target_raw: link.target,
-                context,
-            }));
+        let (node, edges) = parse_file(vault_path, path)?;
+        events.push(ParseEvent::Node(node));
+        for edge in edges {
+            events.push(ParseEvent::Edge(edge));
         }
     }
 
@@ -158,6 +171,8 @@ fn find_context(target_raw: &str, body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     // --- frontmatter parsing ---
@@ -270,5 +285,24 @@ mod tests {
     fn context_is_trimmed() {
         let body = "First.\n\n  has [[X]] link  \n\nLast.";
         assert_eq!(find_context("X", body), "has [[X]] link");
+    }
+
+    // --- parse_file ---
+
+    #[test]
+    fn parse_file_returns_node_and_edges() {
+        let vault = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let file = vault.join("People/Alice Smith.md");
+        let (node, edges) = parse_file(&vault, &file).unwrap();
+        assert_eq!(node.id, "People/Alice Smith.md");
+        assert_eq!(node.title, "Alice Smith");
+        assert!(!edges.is_empty());
+    }
+
+    #[test]
+    fn parse_file_error_for_nonexistent() {
+        let vault = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault");
+        let file = vault.join("nonexistent.md");
+        assert!(parse_file(&vault, &file).is_err());
     }
 }

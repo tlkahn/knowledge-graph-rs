@@ -282,3 +282,161 @@ The parser integration test's node count assertion was updated from
   them fast and focused.
 - **CLI smoke tests** in `cli_smoke.rs`: 3 tests — successful resolve,
   empty result, missing vault error.
+
+---
+
+## Stage 3 — Store + Indexer
+
+Commit: built on top of `d429ea0`.
+
+### Schema design: dropping `path` from `nodes`
+
+The original roadmap specified `nodes(id TEXT PK, path TEXT, ...)`. During
+planning we realized `id` already is the relative path from vault root
+(e.g. `People/Alice Smith.md`), established in Stage 1. Carrying a
+redundant `path` column would create a synchronization hazard with no
+benefit. Dropped it — consumers reconstruct `PathBuf` via
+`vault_path.join(id)` when they need filesystem access.
+
+### Extracting `parse_file` from `parse_vault`
+
+The indexer needs to parse individual files (not the whole vault) for
+changed/new entries. The inner loop of `parse_vault` (lines 33-65 at the
+time) was extracted into a standalone `pub fn parse_file(vault_path, file_path)
+-> Result<(ParsedNode, Vec<ParsedEdge>), Error>`. `parse_vault` now calls
+`parse_file` internally, so behavior is identical and all 13 existing parser
+integration tests continued passing without modification.
+
+Key detail: `parse_file` reads from an absolute `file_path` but computes
+`id` by stripping the `vault_path` prefix — the same `strip_prefix` logic
+as before. The indexer passes `vault.join(relative_path)` as the
+`file_path` argument.
+
+### `extract_aliases` visibility change
+
+`resolve::extract_aliases` was `fn` (private). `Store::upsert_node` needs
+to extract aliases from frontmatter to populate the `aliases` table. Changed
+to `pub(crate) fn` — visible within `kg-core` but not to external consumers.
+This avoids duplicating the alias-extraction logic.
+
+### rusqlite bundled feature
+
+`rusqlite = { version = "0.35", features = ["bundled"] }` compiles SQLite
+from C source as part of the build. This adds ~10s to a clean build but
+eliminates the need for users to have `libsqlite3-dev` installed. Worth it
+for a CLI tool.
+
+### Schema migration strategy
+
+`Store::migrate()` uses `CREATE TABLE IF NOT EXISTS` for all 6 tables and
+`INSERT OR IGNORE INTO meta` for the schema version. This makes
+`Store::open()` idempotent — opening an existing database is a no-op.
+
+`PRAGMA journal_mode=WAL` is set on every open. This is safe to call
+repeatedly (it's a no-op if already WAL). WAL mode avoids locking issues
+if a future stage adds concurrent readers.
+
+### The edge re-resolution tradeoff
+
+The indexer re-resolves ALL edges on every non-trivial run (any add, change,
+or delete). This is simpler than tracking which edges might be affected by
+a node rename/add/delete:
+
+- A new file can satisfy previously-unresolved `[[links]]`.
+- A deleted file can make previously-resolved links ambiguous or unresolved.
+- A renamed file affects both its own outgoing links and all incoming links.
+
+The cost is re-parsing unchanged files for their edges. For the 11-file
+fixture vault this is instant. For larger vaults (thousands of files), this
+will be the first bottleneck to optimize — probably by caching parsed edges
+in the store and only re-parsing the filesystem for changed files.
+
+`replace_all_edges()` implements this with DELETE-all + batch INSERT rather
+than diffing the old and new edge sets. Simpler and correct.
+
+### Stub node semantics
+
+Unresolved link targets get stub nodes with `is_stub=1`. The stub `id` is
+the raw `target_raw` string (e.g. `"Nonexistent Page"`), not a `.md` path.
+This is intentional — we don't know where the file would live if it existed.
+
+`INSERT OR IGNORE` ensures that if a real file later appears with the same
+name, `upsert_node` (which uses `INSERT OR REPLACE`) overwrites the stub
+with full node data and `is_stub=0`. The stub is never accidentally
+preserved over real data because `OR REPLACE` wins over `OR IGNORE`.
+
+### mtime collection: separate from parsing
+
+The plan considered adding `mtime` to `ParsedNode` but rejected it — mtime
+is a filesystem concern, not a parse concern. Instead, `collect_vault_files`
+walks the vault and returns `Vec<(String, i64)>` (relative path, epoch
+seconds). The indexer passes the mtime to `store.upsert_node()` as a
+separate argument.
+
+This keeps `ParsedNode` purely about content. Tests that construct
+`ParsedNode` values don't need to invent fake mtimes.
+
+### Transaction boundaries
+
+`index_vault` wraps the mutating phase (delete old nodes, upsert new/changed
+nodes, replace all edges, create stubs) in a single transaction via
+`BEGIN` / `COMMIT`. If any step fails, the partially-applied changes are
+rolled back automatically when the connection drops (SQLite's implicit
+rollback).
+
+The no-op path (no changes detected) returns early before opening a
+transaction — no unnecessary locking.
+
+### CLI data-dir resolution
+
+Default: `<vault>/.kg/`. The `--data-dir` flag (or `KG_DATA_DIR` env)
+overrides it. `cmd_index` creates the directory (including parents) before
+opening the database. `cmd_stats` does not create it — if the directory
+doesn't exist, SQLite creates an empty database file (which returns all-zero
+stats, the correct behavior for "never indexed").
+
+### Refactoring `require_vault` in main.rs
+
+Three subcommands (`parse`, `resolve`, `index`) had identical
+vault-requirement boilerplate. Extracted into `require_vault(vault:
+Option<PathBuf>) -> Result<PathBuf, Error>`. Similarly, `resolve_data_dir`
+centralizes the `--data-dir` default logic. Small wins that remove
+copy-paste without adding abstraction.
+
+### Test patterns for mutable vault operations
+
+Tests that touch/delete files cannot operate on the shared fixture vault
+(that would break parallel test execution and leave the repo dirty). Pattern:
+`copy_vault_to_tmp()` copies the entire fixture vault into a `tempfile::TempDir`,
+returns the `TempDir` (which auto-cleans on drop). Tests then mutate files
+in the temp copy.
+
+The touch-detection test needs a filesystem mtime change, which requires
+the write to happen at least 1 second after the initial index (filesystem
+mtime granularity). A `std::thread::sleep(Duration::from_secs(1))` before
+the rewrite ensures the mtime advances. This makes the test ~1s slower but
+is the simplest reliable approach.
+
+### Stats: distinct tags
+
+`stats.tags` counts `COUNT(DISTINCT tag)` from the `tags` table — the number
+of unique tag values across the vault, not the total number of tag
+associations. For example, if 5 nodes all have tag `"person"`, that
+contributes 1 to the tag count, not 5. This matches the TS implementation's
+behavior.
+
+### Test counts
+
+Stage 3 added 41 new tests:
+- **26 unit tests** in `store.rs` `#[cfg(test)]`: schema creation, CRUD
+  operations, edge operations, stub semantics, sync queries, stats.
+- **3 integration tests** in `store_test.rs`: open/idempotent/stats via
+  public API.
+- **7 integration tests** in `indexer_test.rs`: collect_vault_files,
+  initial index, no-op re-index, touch detection, deletion detection,
+  full lifecycle.
+- **5 CLI smoke tests** in `cli_smoke.rs`: index output, index requires
+  vault, re-index no-op, stats after index, stats on empty db.
+
+Total across all stages: 138 tests (96 core lib + 7 indexer + 13 parser +
+3 store + 2 envelope + 17 CLI).

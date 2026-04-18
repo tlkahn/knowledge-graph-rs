@@ -3,8 +3,8 @@
 A fast, read-only knowledge graph tool for Obsidian vaults, written in Rust.
 
 Parses markdown files with YAML frontmatter, extracts wiki-link relationships,
-resolves links to canonical node IDs, and (in future stages) indexes, searches,
-and analyzes the resulting graph.
+resolves links to canonical node IDs, and indexes the resulting graph into
+SQLite for persistent, incremental querying.
 Designed to be composed via pipes — every subcommand emits JSON to stdout.
 
 ## Quick start
@@ -12,6 +12,12 @@ Designed to be composed via pipes — every subcommand emits JSON to stdout.
 ```bash
 # Requires Rust 1.94+
 cargo build --release
+
+# Index a vault into a local SQLite database (incremental on re-runs)
+kg index --vault ~/my-vault
+
+# Show graph statistics
+kg stats --vault ~/my-vault
 
 # Parse a vault into nodes and edges (NDJSON, one object per line)
 kg parse --vault ~/my-vault
@@ -28,6 +34,8 @@ kg resolve "WT" --vault ~/my-vault | jq '.id'
 ```
 
 The vault path can also be set via `KG_VAULT_PATH` environment variable.
+The database directory defaults to `<vault>/.kg/` and can be overridden
+with `--data-dir` or `KG_DATA_DIR`.
 
 ## Output format
 
@@ -56,6 +64,18 @@ The vault path can also be set via `KG_VAULT_PATH` environment variable.
 
 Match kinds: `id`, `exact`, `case_insensitive`, `alias`, `substring` (checked in priority order — only the highest-matching tier is returned).
 
+**Index output** — summary of changes applied:
+
+```json
+{"added":42,"changed":0,"deleted":0,"stubs":3}
+```
+
+**Stats output** — current graph counts:
+
+```json
+{"nodes":42,"stubs":3,"edges":128,"tags":15}
+```
+
 Errors always return `{"ok":false,"error":{"kind":"...","message":"..."}}` with a non-zero exit code.
 
 ## What gets parsed
@@ -78,14 +98,22 @@ Wiki links like `[[Alice Smith]]` are resolved to canonical node IDs (e.g. `Peop
 
 Ambiguous links (multiple files with the same basename, no path qualifier) pick the first match alphabetically and emit a warning.
 
+## Persistence and incremental indexing
+
+`kg index` builds a SQLite database (default: `<vault>/.kg/kg.db`) containing the full knowledge graph. Subsequent runs are incremental: only files whose mtime has changed since the last index are re-parsed. Deleted files are cleaned up, and new files are added.
+
+Because adding or removing a node can change how wiki-links resolve across the entire vault, edges are fully re-resolved on every non-trivial index run. Stub nodes (`is_stub=1`) are created for link targets that don't correspond to any file.
+
+`kg stats` reports current counts without re-indexing.
+
 ## Milestones
 
 | Stage | Status | Description |
 |-------|--------|-------------|
 | 0 — Skeleton | Done | Workspace, CLI envelope protocol, `parse` stub |
 | 1 — Parser | Done | Vault walker, frontmatter, wiki-links, NDJSON streaming |
-| 2 — Link resolver | Done | Resolve `[[target]]` to canonical node IDs, `kg resolve` subcommand (97 tests) |
-| 3 — Store + indexer | Planned | SQLite persistence, incremental mtime-based re-indexing |
+| 2 — Link resolver | Done | Resolve `[[target]]` to canonical node IDs, `kg resolve` subcommand |
+| 3 — Store + indexer | Done | SQLite persistence, incremental mtime-based re-indexing, `kg index` + `kg stats` (138 tests) |
 | 4 — Keyword search | Planned | FTS5 full-text search with excerpts |
 | 5 — Graph queries | Planned | Neighbors, paths, shared connections, subgraph extraction |
 | 6 — PageRank | Planned | Ranking on largest connected component |

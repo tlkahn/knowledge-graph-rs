@@ -160,6 +160,91 @@ fn resolve_requires_vault_path() {
     assert_eq!(value["error"]["kind"], "vault_not_found");
 }
 
+// --- index command tests ---
+
+#[test]
+fn index_outputs_valid_json_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+
+    let assert = kg()
+        .args(["index", "--vault", &fixture_vault(), "--data-dir", &data_dir.to_string_lossy()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert!(value.get("added").is_some(), "summary should have 'added' field: {value}");
+    assert!(value["added"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn index_requires_vault() {
+    let assert = kg().arg("index").assert().code(1);
+    let value = parse_stdout_json(&assert.get_output().stdout);
+    assert_eq!(value["ok"], Value::Bool(false));
+    assert_eq!(value["error"]["kind"], "vault_not_found");
+}
+
+#[test]
+fn reindex_shows_zero_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["added"], 0);
+    assert_eq!(value["changed"], 0);
+    assert_eq!(value["deleted"], 0);
+}
+
+// --- stats command tests ---
+
+#[test]
+fn stats_after_index_shows_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    let dd = data_dir.to_string_lossy().to_string();
+
+    kg().args(["index", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+
+    let assert = kg()
+        .args(["stats", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stats is JSON");
+    assert!(value["nodes"].as_i64().unwrap() > 0);
+    assert!(value["edges"].as_i64().unwrap() > 0);
+}
+
+#[test]
+fn stats_on_empty_db_shows_zeros() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kg-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let dd = data_dir.to_string_lossy().to_string();
+
+    let assert = kg()
+        .args(["stats", "--vault", &fixture_vault(), "--data-dir", &dd])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stats is JSON");
+    assert_eq!(value["nodes"], 0);
+    assert_eq!(value["edges"], 0);
+}
+
 fn regex_lite(_pat: &str) -> impl Fn(&str) -> bool {
     |s: &str| {
         let Some(rest) = s.strip_prefix("kg ") else {

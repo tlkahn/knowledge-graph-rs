@@ -15,6 +15,9 @@ pub enum Error {
 
     #[error("vault not found: {path}")]
     VaultNotFound { path: PathBuf },
+
+    #[error("database error: {message}")]
+    Database { message: String },
 }
 
 impl Error {
@@ -23,6 +26,15 @@ impl Error {
             Error::NotImplemented { .. } => "not_implemented",
             Error::Io { .. } => "io",
             Error::VaultNotFound { .. } => "vault_not_found",
+            Error::Database { .. } => "database",
+        }
+    }
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::Database {
+            message: e.to_string(),
         }
     }
 }
@@ -72,6 +84,17 @@ mod tests {
         assert_eq!(value["kind"], "io");
         let message = value["message"].as_str().expect("message is string");
         assert!(message.contains("/some/path.md"), "got {message:?}");
+    }
+
+    #[test]
+    fn database_error_serializes() {
+        let err = Error::Database {
+            message: "table not found".into(),
+        };
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["kind"], "database");
+        let message = value["message"].as_str().expect("message is string");
+        assert!(message.contains("table not found"), "got {message:?}");
     }
 
     #[test]

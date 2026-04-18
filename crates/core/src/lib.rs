@@ -1,6 +1,8 @@
 mod error;
+pub mod indexer;
 pub mod parser;
 pub mod resolve;
+pub mod store;
 pub mod types;
 pub mod wiki_links;
 
